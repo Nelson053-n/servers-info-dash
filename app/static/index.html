@@ -47,6 +47,7 @@ h1{margin:0;font-size:24px;font-weight:600}
 .btn.accent:hover{opacity:.85}
 .btn.danger{background:var(--bad);color:#fff;border-color:var(--bad)}
 .btn.danger:hover{opacity:.85}
+
 /* colour dots */
 .color-picker{position:relative;display:inline-flex;align-items:center}
 .color-trigger{display:block;width:24px;height:24px;border-radius:50%;cursor:pointer;
@@ -182,12 +183,16 @@ tr:last-child td{border-bottom:none}
     <button class="btn" id="toggleBot" type="button"></button>
     <button class="btn" id="toggleSec" type="button"></button>
     <select class="btn" id="intervalSelect" style="padding:6px 8px;font-size:13px">
+      <option value="1">1s</option>
       <option value="5">5s</option>
       <option value="10">10s</option>
       <option value="20">20s</option>
       <option value="30">30s</option>
       <option value="60">60s</option>
+      <option value="300">300s</option>
     </select>
+    <button class="btn" id="sshModeBtn" type="button"
+      title="">SSH</button>
     <span class="msg" id="formMsg"></span>
   </div>
 
@@ -367,6 +372,10 @@ const I = {
     bot_save: "Сохранить бота",
     bot_saved: "Бот сохранён",
     sec_btn: "Безопасность",
+    ssh_normal: "SSH: обычный",
+    ssh_persistent: "SSH: persistent",
+    ssh_tip_normal: "Новое подключение каждый цикл (OK для больших интервалов)",
+    ssh_tip_persistent: "Постоянное соединение (экономит ресурсы при частом опросе)",
     sec_save: "Сохранить",
     sec_saved: "Настройки сохранены",
     sec_pw_mismatch: "Пароли не совпадают",
@@ -452,6 +461,10 @@ const I = {
     bot_save: "Save bot",
     bot_saved: "Bot saved",
     sec_btn: "Security",
+    ssh_normal: "SSH: normal",
+    ssh_persistent: "SSH: persistent",
+    ssh_tip_normal: "New connection each cycle (OK for large intervals)",
+    ssh_tip_persistent: "Keep-alive connection (saves resources on frequent polls)",
     sec_save: "Save",
     sec_saved: "Settings saved",
     sec_pw_mismatch: "Passwords don't match",
@@ -513,6 +526,7 @@ function applyLang() {
   }
   if (lastMeta) showMeta(lastMeta);
   renderTable();
+  if (typeof _syncSshBtn === "function") _syncSshBtn(_sshPersistent);
 }
 
 /* =========  refs  ========= */
@@ -1053,6 +1067,8 @@ async function refresh() {
       clearInterval(window.__di);
       window.__di = setInterval(refresh, intervalMs);
     }
+    /* sync SSH mode button */
+    _syncSshBtn(data.persistent_ssh);
   } catch (err) {
     meta.textContent = t("error_update") + ": " + err.message;
   }
@@ -1072,6 +1088,35 @@ intervalSel.addEventListener("change", async () => {
     intervalMs = v * 1000;
     clearInterval(window.__di);
     window.__di = setInterval(refresh, intervalMs);
+  } catch (_) {}
+});
+
+/* =========  SSH mode toggle  ========= */
+let _sshPersistent = false;
+const sshBtn = $("sshModeBtn");
+
+function _syncSshBtn(val) {
+  _sshPersistent = !!val;
+  if (_sshPersistent) {
+    sshBtn.textContent = t("ssh_persistent");
+    sshBtn.title = t("ssh_tip_persistent");
+  } else {
+    sshBtn.textContent = t("ssh_normal");
+    sshBtn.title = t("ssh_tip_normal");
+  }
+}
+_syncSshBtn(false);
+
+sshBtn.addEventListener("click", async () => {
+  const next = !_sshPersistent;
+  try {
+    const r = await fetch("/api/ssh_mode", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({persistent: next}),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    _syncSshBtn(next);
   } catch (_) {}
 });
 

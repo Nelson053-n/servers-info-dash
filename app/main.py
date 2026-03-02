@@ -74,7 +74,8 @@ class BotConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    refresh_interval_sec: int = Field(default=5, ge=2, le=60)
+    refresh_interval_sec: int = Field(default=5, ge=1, le=300)
+    persistent_ssh: bool = False
     ssh: SSHSettings = Field(default_factory=SSHSettings)
     servers: list[ServerConfig]
     bot: BotConfig = Field(default_factory=BotConfig)
@@ -111,6 +112,8 @@ class MetricsCollector:
         self._error_counts: dict[str, int] = {}
         self._last_good: dict[str, dict[str, Any]] = {}
         self._error_threshold: int = 5
+        self._pool: dict[str, asyncssh.SSHClientConnection] = {}
+        self._pool_lock = asyncio.Lock()
 
     async def collect_all(self) -> dict[str, Any]:
         tasks = [self.collect_server(server) for server in self.cfg.servers]
@@ -120,6 +123,7 @@ class MetricsCollector:
         return {
             "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "refresh_interval_sec": self.cfg.refresh_interval_sec,
+            "persistent_ssh": self.cfg.persistent_ssh,
             "servers": servers,
         }
 
@@ -310,25 +314,80 @@ class MetricsCollector:
         except Exception:  # noqa: BLE001
             return None
 
-    async def _fetch_remote_snapshot(
+    async def _get_connection(
         self,
         server: ServerConfig,
-    ) -> dict[str, Any]:
-        known_hosts = str(Path(self.cfg.ssh.known_hosts).expanduser())
-        client_keys = self._resolve_client_keys(server)
+    ) -> asyncssh.SSHClientConnection:
+        """Get or create a persistent SSH connection."""
+        key = f"{server.host}:{server.port}:{server.user}"
+        async with self._pool_lock:
+            conn = self._pool.get(key)
+            if conn is not None:
+                # Check if connection is still alive
+                try:
+                    # Run a trivial command to verify
+                    await asyncio.wait_for(
+                        conn.run("echo ok", check=True),
+                        timeout=3.0,
+                    )
+                    return conn
+                except Exception:  # noqa: BLE001
+                    try:
+                        conn.close()
+                        await conn.wait_closed()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._pool.pop(key, None)
 
-        command = (
-            "LANG=C head -n 1 /proc/stat; "
-            "cat /proc/net/dev; "
-            "echo '---DF---'; "
-            "df -B1 --output=avail,size / 2>/dev/null "
-            "|| df -k / 2>/dev/null; "
-            "echo '---MEM---'; "
-            "head -n 3 /proc/meminfo; "
-            "echo '---UPTIME---'; "
-            "cat /proc/uptime"
+            known_hosts = str(
+                Path(self.cfg.ssh.known_hosts).expanduser(),
+            )
+            client_keys = self._resolve_client_keys(server)
+            conn = await asyncssh.connect(
+                host=server.host,
+                port=server.port,
+                username=server.user,
+                known_hosts=known_hosts,
+                client_keys=client_keys,
+                preferred_auth=["publickey"],
+                password=None,
+                connect_timeout=self.cfg.ssh.connect_timeout,
+                keepalive_interval=30,
+                keepalive_count_max=3,
+            )
+            self._pool[key] = conn
+            return conn
+
+    async def close_pool(self) -> None:
+        """Close all persistent SSH connections."""
+        async with self._pool_lock:
+            for key, conn in list(self._pool.items()):
+                try:
+                    conn.close()
+                    await conn.wait_closed()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._pool.clear()
+
+    async def _run_ssh_command(
+        self,
+        server: ServerConfig,
+        command: str,
+    ) -> str:
+        """Run command via persistent or one-shot SSH."""
+        if self.cfg.persistent_ssh:
+            conn = await self._get_connection(server)
+            result = await asyncio.wait_for(
+                conn.run(command, check=True),
+                timeout=self.cfg.ssh.command_timeout,
+            )
+            return self._normalize_output(result.stdout)
+
+        # One-shot connection (original behavior)
+        known_hosts = str(
+            Path(self.cfg.ssh.known_hosts).expanduser(),
         )
-
+        client_keys = self._resolve_client_keys(server)
         async with asyncssh.connect(
             host=server.host,
             port=server.port,
@@ -343,27 +402,45 @@ class MetricsCollector:
                 conn.run(command, check=True),
                 timeout=self.cfg.ssh.command_timeout,
             )
-            stdout = self._normalize_output(result.stdout)
-            cpu_total, cpu_idle = self._parse_cpu_line(stdout)
-            iface, rx_bytes, tx_bytes = self._parse_net_dev(
-                stdout,
-                server.interface,
-            )
-            disk_free, disk_total = self._parse_df(stdout)
-            ram_used, ram_total = self._parse_meminfo(stdout)
-            uptime_days = self._parse_uptime(stdout)
-            return {
-                "cpu_total": cpu_total,
-                "cpu_idle": cpu_idle,
-                "iface": iface,
-                "rx_bytes": rx_bytes,
-                "tx_bytes": tx_bytes,
-                "disk_free_gb": disk_free,
-                "disk_total_gb": disk_total,
-                "ram_used_gb": ram_used,
-                "ram_total_gb": ram_total,
-                "uptime_days": uptime_days,
-            }
+            return self._normalize_output(result.stdout)
+
+    async def _fetch_remote_snapshot(
+        self,
+        server: ServerConfig,
+    ) -> dict[str, Any]:
+        command = (
+            "LANG=C head -n 1 /proc/stat; "
+            "cat /proc/net/dev; "
+            "echo '---DF---'; "
+            "df -B1 --output=avail,size / 2>/dev/null "
+            "|| df -k / 2>/dev/null; "
+            "echo '---MEM---'; "
+            "head -n 3 /proc/meminfo; "
+            "echo '---UPTIME---'; "
+            "cat /proc/uptime"
+        )
+
+        stdout = await self._run_ssh_command(server, command)
+        cpu_total, cpu_idle = self._parse_cpu_line(stdout)
+        iface, rx_bytes, tx_bytes = self._parse_net_dev(
+            stdout,
+            server.interface,
+        )
+        disk_free, disk_total = self._parse_df(stdout)
+        ram_used, ram_total = self._parse_meminfo(stdout)
+        uptime_days = self._parse_uptime(stdout)
+        return {
+            "cpu_total": cpu_total,
+            "cpu_idle": cpu_idle,
+            "iface": iface,
+            "rx_bytes": rx_bytes,
+            "tx_bytes": tx_bytes,
+            "disk_free_gb": disk_free,
+            "disk_total_gb": disk_total,
+            "ram_used_gb": ram_used,
+            "ram_total_gb": ram_total,
+            "uptime_days": uptime_days,
+        }
 
     def _resolve_client_keys(self, server: ServerConfig) -> list[str] | None:
         if server.client_key:
@@ -794,13 +871,21 @@ async def _bootstrap_monitor_user(
     _ensure_host_in_known_hosts(host, port)
     monitor_q = shlex.quote(monitor_user)
     home_q = shlex.quote(f"/home/{monitor_user}")
-    key_q = shlex.quote(public_key)
+    # Prefix key with SSH restrictions to block tunneling/forwarding
+    restricted_key = (
+        "no-port-forwarding,no-X11-forwarding,"
+        "no-agent-forwarding,no-pty "
+        + public_key
+    )
+    key_q = shlex.quote(restricted_key)
+    # Also quote the raw key for grep to remove old unrestricted entry
+    raw_key_q = shlex.quote(public_key)
     script = " ".join(
         [
             "set -e;",
             (
                 f"id -u {monitor_q} >/dev/null 2>&1 || "
-                f"useradd -m -s /bin/bash {monitor_q};"
+                f"useradd -m -s /bin/sh {monitor_q};"
             ),
             f"home_dir=$(getent passwd {monitor_q} | cut -d: -f6);",
             f"[ -n \"$home_dir\" ] || home_dir={home_q};",
@@ -812,6 +897,12 @@ async def _bootstrap_monitor_user(
             "touch \"$auth_file\";",
             f"chown {monitor_q}:{monitor_q} \"$auth_file\";",
             "chmod 600 \"$auth_file\";",
+            # Remove old unrestricted key if present
+            (
+                f"grep -vF {raw_key_q} \"$auth_file\" > \"$auth_file.tmp\" "
+                f"|| true; mv \"$auth_file.tmp\" \"$auth_file\";"
+            ),
+            # Add restricted key if not already there
             (
                 f"grep -qxF {key_q} \"$auth_file\" || "
                 f"printf '%s\\n' {key_q} >> \"$auth_file\";"
@@ -1937,7 +2028,7 @@ async def rename_server(
 
 
 class IntervalRequest(BaseModel):
-    interval: int = Field(ge=2, le=60)
+    interval: int = Field(ge=1, le=300)
 
 
 class BotConfigRequest(BaseModel):
@@ -1963,6 +2054,27 @@ async def update_interval(
     return {
         "status": "ok",
         "refresh_interval_sec": cfg.refresh_interval_sec,
+    }
+
+
+class SshModeRequest(BaseModel):
+    persistent: bool
+
+
+@app.put("/api/ssh_mode")
+async def update_ssh_mode(
+    payload: SshModeRequest,
+) -> dict[str, Any]:
+    old = cfg.persistent_ssh
+    with CONFIG_LOCK:
+        cfg.persistent_ssh = payload.persistent
+        save_config(cfg)
+    # If switching OFF persistent, close all pooled connections
+    if old and not payload.persistent:
+        await collector.close_pool()
+    return {
+        "status": "ok",
+        "persistent_ssh": cfg.persistent_ssh,
     }
 
 
