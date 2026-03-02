@@ -1,0 +1,57 @@
+# Шаблон ключевой информации проекта
+# Скопируйте файл в key-info.yaml и заполните своими данными.
+# Не коммитьте заполненный key-info.yaml в Git.
+
+project:
+  name: "Server Info Dashboard"
+  environment: "prod" # dev | stage | prod
+  owner_team: "infra"
+  timezone: "Europe/Moscow"
+
+contacts:
+  primary:
+    name: ""
+    role: ""
+    email: ""
+    telegram: ""
+  backup:
+    name: ""
+    role: ""
+    email: ""
+    telegram: ""
+
+access:
+  dashboard_url: "http://127.0.0.1:8000"
+  repo_url: ""
+  ssh_user_default: "monitor"
+  known_hosts_path: "~/.ssh/known_hosts"
+  private_key_path: "~/.ssh/id_ed25519"
+
+alerts:
+  enabled: false
+  channel: "" # telegram | slack | email
+  target: ""
+  cpu_threshold_percent: 85
+  ping_threshold_ms: 200
+
+servers:
+  - name: "app-prod-1"
+    host: "10.10.1.11"
+    port: 22
+    interface: "eth0"
+    purpose: "application"
+    location: "dc-1"
+    notes: ""
+
+  - name: "db-prod-1"
+    host: "10.10.1.12"
+    port: 22
+    interface: "eth0"
+    purpose: "database"
+    location: "dc-1"
+    notes: ""
+
+notes:
+  runbook_url: ""
+  maintenance_window: ""
+  extra: ""

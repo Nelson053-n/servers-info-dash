@@ -1,0 +1,1235 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Server Info Dashboard</title>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0f172a;--panel:#111827;--line:#243043;
+  --text:#e5e7eb;--muted:#94a3b8;
+  --ok:#22c55e;--bad:#ef4444;--accent:#3b82f6;
+}
+:root.light{
+  color-scheme:light;
+  --bg:#f1f5f9;--panel:#fff;--line:#cbd5e1;
+  --text:#1e293b;--muted:#64748b;
+  --ok:#16a34a;--bad:#dc2626;--accent:#2563eb;
+}
+/* full colour themes — dark */
+:root.clr-purple{--bg:#1a1025;--panel:#1e1533;--line:#32234d;--accent:#8b5cf6}
+:root.clr-emerald{--bg:#0a1f1a;--panel:#0d2922;--line:#17413a;--accent:#10b981}
+:root.clr-rose{--bg:#1f0a14;--panel:#2a0e1c;--line:#4d1a34;--accent:#f43f5e}
+:root.clr-amber{--bg:#1a1408;--panel:#241c0c;--line:#3d3015;--accent:#f59e0b}
+:root.clr-cyan{--bg:#071a1f;--panel:#0b2228;--line:#153a43;--accent:#06b6d4}
+/* full colour themes — light */
+:root.light.clr-purple{--bg:#f5f0ff;--panel:#fff;--line:#d4bfff;--accent:#7c3aed}
+:root.light.clr-emerald{--bg:#ecfdf5;--panel:#fff;--line:#a7f3d0;--accent:#059669}
+:root.light.clr-rose{--bg:#fff1f2;--panel:#fff;--line:#fecdd3;--accent:#e11d48}
+:root.light.clr-amber{--bg:#fffbeb;--panel:#fff;--line:#fde68a;--accent:#d97706}
+:root.light.clr-cyan{--bg:#ecfeff;--panel:#fff;--line:#a5f3fc;--accent:#0891b2}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:Segoe UI,Roboto,sans-serif;transition:background .2s,color .2s}
+.wrap{max-width:1260px;margin:24px auto;padding:0 16px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+h1{margin:0;font-size:24px;font-weight:600}
+.header-right{display:flex;align-items:center;gap:8px}
+.sub{color:var(--muted);margin-bottom:16px}
+.toolbar{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.btn{border:1px solid var(--line);background:var(--panel);color:var(--text);
+  border-radius:8px;padding:8px 12px;cursor:pointer;font-size:14px;transition:background .1s}
+.btn:hover{background:var(--line)}
+.btn.small{padding:4px 8px;font-size:12px}
+.btn.accent{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn.accent:hover{opacity:.85}
+.btn.danger{background:var(--bad);color:#fff;border-color:var(--bad)}
+.btn.danger:hover{opacity:.85}
+/* colour dots */
+.color-picker{position:relative;display:inline-flex;align-items:center}
+.color-trigger{display:block;width:24px;height:24px;border-radius:50%;cursor:pointer;
+  border:2px solid var(--line);transition:border-color .15s,transform .15s;flex-shrink:0}
+.color-trigger:hover{transform:scale(1.1);border-color:var(--muted)}
+.color-dropdown{position:absolute;top:calc(100% + 6px);right:0;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;padding:8px 10px;
+  gap:6px;z-index:50;box-shadow:0 6px 20px rgba(0,0,0,.35);
+  display:none;flex-direction:row}
+.color-dropdown.open{display:flex}
+.cdot{width:22px;height:22px;border-radius:50%;border:2px solid transparent;
+  cursor:pointer;transition:border-color .15s,transform .15s}
+.cdot:hover{transform:scale(1.15)}
+.cdot.active{border-color:var(--text)}
+.cdot[data-c="blue"]{background:linear-gradient(135deg,#3b82f6,#1d4ed8)}
+.cdot[data-c="purple"]{background:linear-gradient(135deg,#8b5cf6,#6d28d9)}
+.cdot[data-c="emerald"]{background:linear-gradient(135deg,#10b981,#047857)}
+.cdot[data-c="rose"]{background:linear-gradient(135deg,#f43f5e,#be123c)}
+.cdot[data-c="amber"]{background:linear-gradient(135deg,#f59e0b,#b45309)}
+.cdot[data-c="cyan"]{background:linear-gradient(135deg,#06b6d4,#0e7490)}
+/* forms */
+.add-form,.bot-form{display:grid;grid-template-columns:repeat(3,minmax(168px,1fr));
+  gap:10px;margin-bottom:14px}
+.add-form input,.add-form select,.bot-form input{
+  border:1px solid var(--line);background:var(--panel);color:var(--text);
+  border-radius:8px;padding:8px 10px;font-size:14px}
+.add-form label,.bot-form label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.hidden{display:none!important}
+.msg{font-size:13px;color:var(--muted)}
+.msg.ok{color:var(--ok)}.msg.bad{color:var(--bad)}
+/* table */
+table{width:100%;border-collapse:collapse;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+th{color:var(--muted);font-weight:600;cursor:pointer;user-select:none;white-space:nowrap}
+th:hover{color:var(--text)}
+th .arrow{font-size:11px;margin-left:3px}
+tr:last-child td{border-bottom:none}
+.status{display:inline-block;min-width:70px;text-align:center;border-radius:999px;
+  padding:2px 8px;font-size:12px;font-weight:600}
+.up{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
+.down{background:color-mix(in srgb,var(--bad) 20%,transparent);color:var(--bad)}
+.err{color:var(--bad);font-size:12px}
+.editable-name{cursor:pointer;border-bottom:1px dashed var(--muted);padding-bottom:1px}
+.editable-name:hover{border-color:var(--accent)}
+.edit-input{background:var(--panel);color:var(--text);border:1px solid var(--accent);
+  border-radius:4px;padding:2px 6px;font-size:14px;width:120px}
+.disk-bar{display:flex;align-items:center;gap:6px}
+.disk-track{flex:1;height:6px;background:var(--line);border-radius:3px;overflow:hidden;min-width:40px}
+.disk-fill{height:100%;border-radius:3px;transition:width .3s}
+.disk-text{font-size:12px;white-space:nowrap}
+/* tooltip button */
+.iface-tip{position:relative;cursor:default;min-width:24px;text-align:center}
+.iface-tip:hover::after{content:attr(title);position:absolute;bottom:calc(100% + 6px);left:50%;
+  transform:translateX(-50%);background:var(--panel);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;padding:4px 10px;font-size:12px;white-space:nowrap;z-index:100;
+  box-shadow:0 4px 12px rgba(0,0,0,.3);pointer-events:none}
+/* error tooltip button */
+.err-tip{position:relative;cursor:default;min-width:24px;text-align:center;color:var(--muted)}
+.err-tip:hover::after{content:attr(title);position:absolute;bottom:calc(100% + 6px);left:50%;
+  transform:translateX(-50%);background:var(--panel);color:var(--ok);border:1px solid var(--line);
+  border-radius:6px;padding:4px 10px;font-size:12px;white-space:nowrap;z-index:100;
+  box-shadow:0 4px 12px rgba(0,0,0,.3);pointer-events:none}
+.err-tip.err-active{background:var(--bad);color:#fff;border-color:var(--bad);animation:err-pulse 1.5s infinite}
+.err-tip.err-active:hover::after{color:var(--bad);border-color:var(--bad);
+  white-space:pre-wrap;max-width:300px}
+@keyframes err-pulse{0%,100%{opacity:1}50%{opacity:.6}}
+/* action tooltip */
+.act-tip{position:relative}
+.act-tip:hover::after{content:attr(title);position:absolute;bottom:calc(100% + 6px);left:50%;
+  transform:translateX(-50%);background:var(--panel);color:var(--text);border:1px solid var(--line);
+  border-radius:6px;padding:4px 10px;font-size:12px;white-space:nowrap;z-index:100;
+  box-shadow:0 4px 12px rgba(0,0,0,.3);pointer-events:none}
+/* delete confirmation overlay */
+.confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);
+  display:flex;align-items:center;justify-content:center;z-index:999}
+.confirm-box{background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;padding:24px 32px;text-align:center;max-width:360px}
+.confirm-box p{margin:0 0 18px;font-size:15px}
+.confirm-box .btns{display:flex;gap:10px;justify-content:center}
+/* login overlay */
+.login-overlay{position:fixed;inset:0;background:var(--bg);
+  display:flex;align-items:center;justify-content:center;z-index:2000}
+.login-box{background:var(--panel);border:1px solid var(--line);
+  border-radius:14px;padding:32px 36px;width:340px;text-align:center}
+.login-box h2{margin:0 0 16px;font-size:20px}
+.login-box input{width:100%;border:1px solid var(--line);background:var(--bg);
+  color:var(--text);border-radius:8px;padding:10px 12px;font-size:15px;margin-bottom:12px}
+.login-box .btn{width:100%;margin-bottom:8px}
+.login-box .login-err{color:var(--bad);font-size:13px;min-height:18px}
+/* security form */
+.sec-form{display:grid;grid-template-columns:repeat(2,1fr);
+  gap:10px;margin-bottom:14px}
+.sec-form input{border:1px solid var(--line);background:var(--panel);color:var(--text);
+  border-radius:8px;padding:8px 10px;font-size:14px}
+.sec-form .full{grid-column:1/-1}
+.sec-history{max-height:260px;overflow-y:auto;margin-top:8px;
+  font-size:13px;border:1px solid var(--line);border-radius:8px}
+.sec-history table{margin:0;border:none;font-size:13px}
+.sec-history th,.sec-history td{padding:5px 8px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Server Info Dashboard</h1>
+    <div class="header-right">
+      <div class="color-picker" id="colorPicker">
+        <span class="color-trigger" id="colorTrigger"></span>
+        <div class="color-dropdown" id="colorDropdown">
+          <span class="cdot" data-c="blue" title="Blue"></span>
+          <span class="cdot" data-c="purple" title="Purple"></span>
+          <span class="cdot" data-c="emerald" title="Emerald"></span>
+          <span class="cdot" data-c="rose" title="Rose"></span>
+          <span class="cdot" data-c="amber" title="Amber"></span>
+          <span class="cdot" data-c="cyan" title="Cyan"></span>
+        </div>
+      </div>
+      <button class="btn small" id="langToggle"
+        type="button">EN</button>
+      <button class="btn small hidden" id="infoBtn"
+        type="button" data-i="info_btn">Info</button>
+      <button class="btn small hidden" id="logoutBtn"
+        type="button" data-i="logout_btn">Выход</button>
+      <button class="btn small" id="themeToggle"
+        type="button">&#127769;</button>
+    </div>
+  </header>
+  <div class="sub" id="meta"></div>
+
+  <div class="toolbar">
+    <button class="btn" id="toggleAdd" type="button"></button>
+    <button class="btn" id="toggleBot" type="button"></button>
+    <button class="btn" id="toggleSec" type="button"></button>
+    <select class="btn" id="intervalSelect" style="padding:6px 8px;font-size:13px">
+      <option value="5">5s</option>
+      <option value="10">10s</option>
+      <option value="20">20s</option>
+      <option value="30">30s</option>
+      <option value="60">60s</option>
+    </select>
+    <span class="msg" id="formMsg"></span>
+  </div>
+
+  <form class="add-form hidden" id="addForm">
+    <input id="srvName" required/>
+    <input id="host" required/>
+    <input id="user" value="monitor" required/>
+    <input id="port" type="number" min="1" max="65535"
+      value="22" required/>
+    <input id="iface"/>
+    <input id="clientKey"/>
+    <label>
+      <input id="bootstrapWithRoot" type="checkbox"/>
+      <span data-i="bootstrap_label"></span>
+    </label>
+    <input class="bootstrap-only hidden" id="rootUser"/>
+    <input class="bootstrap-only hidden" id="rootPassword"
+      type="password"/>
+    <label class="bootstrap-only hidden">
+      <input id="generateKey" type="checkbox" checked/>
+      <span data-i="generate_key"></span>
+    </label>
+    <input class="bootstrap-only pubkey-manual hidden"
+      id="publicKey"/>
+    <button class="btn accent" type="submit"
+      data-i="save_btn"></button>
+  </form>
+
+  <form class="bot-form hidden" id="botForm">
+    <label>
+      <input id="botEnabled" type="checkbox"/>
+      <span data-i="bot_enable"></span>
+    </label>
+    <input id="botToken" type="password"
+      placeholder="Telegram bot token"
+      autocomplete="off"/>
+    <input id="botChatId" placeholder="Chat ID"/>
+    <label>
+      <input id="botNotifyDown" type="checkbox" checked/>
+      <span data-i="bot_notify_down"></span>
+    </label>
+    <input id="botCpuThreshold" type="number"
+      min="0" max="100" step="1"/>
+    <input id="botPingThreshold" type="number"
+      min="0" step="1"/>
+    <input id="botDiskThreshold" type="number"
+      min="0" max="100" step="1"/>
+    <input id="botRxThreshold" type="number"
+      min="0" step="0.1"/>
+    <input id="botTxThreshold" type="number"
+      min="0" step="0.1"/>
+    <input id="botDelay" type="number"
+      min="1" max="999" step="1" value="1"/>
+    <button class="btn accent" type="submit"
+      data-i="bot_save"></button>
+    <span class="msg" id="botMsg"></span>
+  </form>
+
+  <div class="sec-form hidden" id="secPanel">
+    <input id="secCurrentPassword" type="password"/>
+    <input id="secPassword" type="password"/>
+    <input id="secPasswordConfirm" type="password"/>
+    <input id="secNetworks" class="full"/>
+    <div style="display:flex;gap:8px;grid-column:1/-1">
+      <button class="btn accent" id="secSave" type="button"
+        data-i="sec_save"></button>
+      <span class="msg" id="secMsg"></span>
+    </div>
+    <div class="sec-history full" id="secHistory"></div>
+  </div>
+
+  <table>
+    <thead>
+      <tr id="headerRow">
+        <th data-key="name"><span data-i="col_server"></span><span class="arrow"></span></th>
+        <th data-key="host"><span data-i="col_host"></span><span class="arrow"></span></th>
+        <th data-key="status"><span data-i="col_status"></span><span class="arrow"></span></th>
+        <th data-key="uptime_days"><span data-i="col_uptime"></span><span class="arrow"></span></th>
+        <th data-key="ping_ms"><span data-i="col_ping"></span><span class="arrow"></span></th>
+        <th data-key="cpu_percent"><span data-i="col_cpu"></span><span class="arrow"></span></th>
+        <th data-key="ram"><span data-i="col_ram"></span><span class="arrow"></span></th>
+        <th data-key="disk"><span data-i="col_disk"></span><span class="arrow"></span></th>
+        <th data-key="rx_mbps">RX<span class="arrow"></span></th>
+        <th data-key="tx_mbps">TX<span class="arrow"></span></th>
+        <th data-i="col_actions"></th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<!-- login overlay (hidden by default) -->
+<div class="login-overlay hidden" id="loginOverlay">
+  <div class="login-box">
+    <h2 data-i="login_title">Server Info Dashboard</h2>
+    <input id="loginPassword" type="password" autofocus/>
+    <button class="btn accent" id="loginBtn" type="button"
+      data-i="login_btn">Войти</button>
+    <div class="login-err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- delete confirm overlay (hidden) -->
+<div class="confirm-overlay hidden" id="confirmOverlay">
+  <div class="confirm-box">
+    <p id="confirmText"></p>
+    <div class="btns">
+      <button class="btn danger" id="confirmYes"></button>
+      <button class="btn" id="confirmNo"></button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* =========  i18n  ========= */
+const I = {
+  ru: {
+    title: "Server Info Dashboard",
+    loading: "Загрузка...",
+    collecting: "Сбор метрик... Первый запуск может занять несколько секунд",
+    updated: "Обновлено",
+    interval: "Интервал",
+    add_server: "+ Добавить сервер",
+    bot_btn: "Бот уведомлений",
+    save_btn: "Сохранить",
+    col_server: "Сервер",
+    col_host: "Host",
+    col_status: "Статус",
+    col_ping: "Ping",
+    col_cpu: "CPU %",
+    col_ram: "RAM",
+    col_disk: "Диск",
+    col_uptime: "Uptime",
+    col_iface: "Интерфейс",
+    col_error: "Ошибка",
+    col_actions: "Действия",
+    delete_btn: "X",
+    confirm_delete: "Удалить сервер",
+    confirm_delete_body: "SSH-ключ также будет удалён.",
+    confirm_hide_body: "Строка будет скрыта из таблицы.",
+    info_btn: "Info",
+    log_btn: "L",
+    tip_log: "Скачать логи",
+    tip_no_err: "Ошибок соединения нет",
+    tip_iface: "Интерфейс",
+    tip_delete: "Удаление сервера",
+    confirm_yes: "Да, удалить",
+    confirm_no: "Отмена",
+    server_added: "Сервер добавлен",
+    server_deleted: "удалён",
+    saving: "Сохраняю...",
+    setting_up: "Настройка сервера...",
+    deleting: "Удаляю...",
+    renamed: "Переименован",
+    error_prefix: "Ошибка",
+    error_update: "Ошибка обновления",
+    bootstrap_label: "Авто-настройка через root",
+    generate_key: "Сгенерировать SSH-ключ",
+    ph_name: "имя сервера",
+    ph_host: "host / IP",
+    ph_user: "monitor user",
+    ph_port: "port",
+    ph_iface: "interface (опц.)",
+    ph_client_key: "client_key path (опц.)",
+    ph_root_user: "root user",
+    ph_root_pass: "root password",
+    ph_public_key: "public key / SHA256 (опц.)",
+    ph_cpu_threshold: "CPU порог (%)",
+    ph_ping_threshold: "Ping порог (мс)",
+    ph_disk_threshold: "Диск порог (%)",
+    ph_rx_threshold: "RX порог (Mbps)",
+    ph_tx_threshold: "TX порог (Mbps)",
+    ph_delay: "Задержка (циклов)",
+    bot_token_set: "Токен задан (оставьте пустым чтобы сохранить)",
+    bot_enable: "Включить бота",
+    bot_notify_down: "Уведомлять при DOWN",
+    bot_save: "Сохранить бота",
+    bot_saved: "Бот сохранён",
+    sec_btn: "Безопасность",
+    sec_save: "Сохранить",
+    sec_saved: "Настройки сохранены",
+    sec_pw_mismatch: "Пароли не совпадают",
+    sec_pw_set: "Пароль задан",
+    sec_pw_not_set: "Пароль не задан",
+    ph_sec_cur_pw: "Текущий пароль",
+    ph_sec_pw: "Новый пароль (мин. 8 символов, пусто = не менять)",
+    ph_sec_pw2: "Повторите пароль",
+    ph_sec_nets: "192.168.1.0/24, 10.0.0.5 (через запятую)",
+    sec_history_title: "Последние входы",
+    sec_col_time: "Время",
+    sec_col_ip: "IP",
+    sec_col_country: "Страна",
+    sec_col_ua: "Система",
+    login_title: "Server Info Dashboard",
+    login_btn: "Войти",
+    login_blocked: "Заблокировано",
+    login_wrong: "Неверный пароль",
+    login_remaining: "Осталось попыток",
+    logout_btn: "Выход",
+    sec_reset_hint: "Сброс: удалить password_hash в config/auth.yaml",
+  },
+  en: {
+    title: "Server Info Dashboard",
+    loading: "Loading...",
+    collecting: "Collecting metrics... First run may take a few seconds",
+    updated: "Updated",
+    interval: "Interval",
+    add_server: "+ Add server",
+    bot_btn: "Notification bot",
+    save_btn: "Save",
+    col_server: "Server",
+    col_host: "Host",
+    col_status: "Status",
+    col_ping: "Ping",
+    col_cpu: "CPU %",
+    col_ram: "RAM",
+    col_disk: "Disk",
+    col_uptime: "Uptime",
+    col_iface: "Interface",
+    col_error: "Error",
+    col_actions: "Actions",
+    delete_btn: "X",
+    confirm_delete: "Delete server",
+    confirm_delete_body: "SSH key will also be removed.",
+    confirm_hide_body: "Row will be hidden from table.",
+    info_btn: "Info",
+    log_btn: "L",
+    tip_log: "Download logs",
+    tip_no_err: "No connection errors",
+    tip_iface: "Interface",
+    tip_delete: "Delete server",
+    confirm_yes: "Yes, delete",
+    confirm_no: "Cancel",
+    server_added: "Server added",
+    server_deleted: "deleted",
+    saving: "Saving...",
+    setting_up: "Setting up server...",
+    deleting: "Deleting...",
+    renamed: "Renamed",
+    error_prefix: "Error",
+    error_update: "Update error",
+    bootstrap_label: "Auto-setup via root",
+    generate_key: "Generate SSH key",
+    ph_name: "server name",
+    ph_host: "host / IP",
+    ph_user: "monitor user",
+    ph_port: "port",
+    ph_iface: "interface (opt.)",
+    ph_client_key: "client_key path (opt.)",
+    ph_root_user: "root user",
+    ph_root_pass: "root password",
+    ph_public_key: "public key / SHA256 (opt.)",
+    ph_cpu_threshold: "CPU threshold (%)",
+    ph_ping_threshold: "Ping threshold (ms)",
+    ph_disk_threshold: "Disk threshold (%)",
+    ph_rx_threshold: "RX threshold (Mbps)",
+    ph_tx_threshold: "TX threshold (Mbps)",
+    ph_delay: "Delay (cycles)",
+    bot_token_set: "Token set (leave empty to keep)",
+    bot_enable: "Enable bot",
+    bot_notify_down: "Notify on DOWN",
+    bot_save: "Save bot",
+    bot_saved: "Bot saved",
+    sec_btn: "Security",
+    sec_save: "Save",
+    sec_saved: "Settings saved",
+    sec_pw_mismatch: "Passwords don't match",
+    sec_pw_set: "Password is set",
+    sec_pw_not_set: "No password set",
+    ph_sec_cur_pw: "Current password",
+    ph_sec_pw: "New password (min 8 chars, empty = keep)",
+    ph_sec_pw2: "Confirm password",
+    ph_sec_nets: "192.168.1.0/24, 10.0.0.5 (comma-separated)",
+    sec_history_title: "Recent logins",
+    sec_col_time: "Time",
+    sec_col_ip: "IP",
+    sec_col_country: "Country",
+    sec_col_ua: "System",
+    login_title: "Server Info Dashboard",
+    login_btn: "Login",
+    login_blocked: "Blocked",
+    login_wrong: "Wrong password",
+    login_remaining: "Attempts left",
+    logout_btn: "Logout",
+    sec_reset_hint: "Reset: delete password_hash in config/auth.yaml",
+  },
+};
+
+let lang = localStorage.getItem("lang") || "ru";
+
+function t(key) { return I[lang][key] || key; }
+
+function applyLang() {
+  document.querySelectorAll("[data-i]").forEach(el => {
+    el.textContent = t(el.dataset.i);
+  });
+  document.getElementById("toggleAdd").textContent = t("add_server");
+  document.getElementById("toggleBot").textContent = t("bot_btn");
+  document.getElementById("toggleSec").textContent = t("sec_btn");
+  document.getElementById("langToggle").textContent = lang === "ru" ? "EN" : "RU";
+  /* placeholders */
+  const ph = {
+    srvName: "ph_name", host: "ph_host",
+    user: "ph_user", port: "ph_port",
+    iface: "ph_iface", clientKey: "ph_client_key",
+    rootUser: "ph_root_user",
+    rootPassword: "ph_root_pass",
+    publicKey: "ph_public_key",
+    botCpuThreshold: "ph_cpu_threshold",
+    botPingThreshold: "ph_ping_threshold",
+    botDiskThreshold: "ph_disk_threshold",
+    botRxThreshold: "ph_rx_threshold",
+    botTxThreshold: "ph_tx_threshold",
+    botDelay: "ph_delay",
+    secCurrentPassword: "ph_sec_cur_pw",
+    secPassword: "ph_sec_pw",
+    secPasswordConfirm: "ph_sec_pw2",
+    secNetworks: "ph_sec_nets",
+  };
+  for (const [id, key] of Object.entries(ph)) {
+    const el = document.getElementById(id);
+    if (el) el.placeholder = t(key);
+  }
+  if (lastMeta) showMeta(lastMeta);
+  renderTable();
+}
+
+/* =========  refs  ========= */
+const $ = (id) => document.getElementById(id);
+const rows      = $("rows");
+const meta      = $("meta");
+const addForm   = $("addForm");
+const toggleAdd = $("toggleAdd");
+const botForm   = $("botForm");
+const toggleBot = $("toggleBot");
+const formMsg   = $("formMsg");
+const botMsg    = $("botMsg");
+const bsToggle  = $("bootstrapWithRoot");
+const bsFields  = document.querySelectorAll(".bootstrap-only");
+const genToggle = $("generateKey");
+const pkFields  = document.querySelectorAll(".pubkey-manual");
+const themeBtn  = $("themeToggle");
+const langBtn   = $("langToggle");
+const colorPick = $("colorPicker");
+const overlay   = $("confirmOverlay");
+const confText  = $("confirmText");
+const confYes   = $("confirmYes");
+const confNo    = $("confirmNo");
+const infoBtn   = $("infoBtn");
+const logoutBtn = $("logoutBtn");
+const secPanel  = $("secPanel");
+const toggleSec = $("toggleSec");
+const secMsg    = $("secMsg");
+const loginOvl  = $("loginOverlay");
+
+let intervalMs = 5000;
+let serverData = [];
+let sortKey = null;
+let sortAsc = true;
+let lastMeta = null;
+let showLocal = localStorage.getItem("showLocal") !== "false";
+
+/* =========  helpers  ========= */
+const fmt = (v, d) =>
+  v == null ? "\u2014" : Number(v).toFixed(d);
+
+const esc = (v) => {
+  if (v == null) return "";
+  return String(v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+};
+
+
+/* CPU colour: green(0%) → yellow(50%) → red(100%) */
+function cpuColor(pct) {
+  if (pct == null) return "var(--muted)";
+  const p = Math.max(0, Math.min(100, pct));
+  let r, g;
+  if (p <= 50) {
+    r = Math.round(255 * (p / 50));
+    g = 200;
+  } else {
+    r = 255;
+    g = Math.round(200 * (1 - (p - 50) / 50));
+  }
+  return "rgb(" + r + "," + g + ",60)";
+}
+
+/* =========  theme + colour  ========= */
+const root = document.documentElement;
+
+function applyTheme() {
+  const dark = localStorage.getItem("theme") !== "light";
+  root.classList.toggle("light", !dark);
+  themeBtn.textContent = dark ? "\uD83C\uDF19" : "\u2600\uFE0F";
+}
+
+const colorTrigger = $("colorTrigger");
+const colorDD = $("colorDropdown");
+
+const colorGrads = {
+  blue:"linear-gradient(135deg,#3b82f6,#1d4ed8)",
+  purple:"linear-gradient(135deg,#8b5cf6,#6d28d9)",
+  emerald:"linear-gradient(135deg,#10b981,#047857)",
+  rose:"linear-gradient(135deg,#f43f5e,#be123c)",
+  amber:"linear-gradient(135deg,#f59e0b,#b45309)",
+  cyan:"linear-gradient(135deg,#06b6d4,#0e7490)",
+};
+
+function applyColor() {
+  const c = localStorage.getItem("accentColor") || "blue";
+  const keep = [];
+  root.classList.forEach(cls => {
+    if (!cls.startsWith("clr-")) keep.push(cls);
+  });
+  root.className = keep.join(" ");
+  if (c !== "blue") root.classList.add("clr-" + c);
+  colorPick.querySelectorAll(".cdot").forEach(d => {
+    d.classList.toggle("active", d.dataset.c === c);
+  });
+  colorTrigger.style.background = colorGrads[c] || colorGrads.blue;
+}
+
+colorTrigger.addEventListener("click", (e) => {
+  e.stopPropagation();
+  colorDD.classList.toggle("open");
+});
+
+document.addEventListener("click", (e) => {
+  if (!colorPick.contains(e.target)) colorDD.classList.remove("open");
+});
+
+themeBtn.addEventListener("click", () => {
+  localStorage.setItem(
+    "theme",
+    root.classList.contains("light") ? "dark" : "light",
+  );
+  applyTheme();
+});
+
+colorPick.addEventListener("click", (e) => {
+  const dot = e.target.closest(".cdot");
+  if (!dot) return;
+  localStorage.setItem("accentColor", dot.dataset.c);
+  applyColor();
+  colorDD.classList.remove("open");
+});
+
+langBtn.addEventListener("click", () => {
+  lang = lang === "ru" ? "en" : "ru";
+  localStorage.setItem("lang", lang);
+  applyLang();
+});
+
+function updateInfoBtn() {
+  infoBtn.classList.toggle("hidden", showLocal);
+}
+
+infoBtn.addEventListener("click", () => {
+  showLocal = true;
+  localStorage.setItem("showLocal", "true");
+  updateInfoBtn();
+  renderTable();
+});
+
+updateInfoBtn();
+
+applyTheme();
+applyColor();
+
+/* =========  sorting  ========= */
+function sorted(list) {
+  if (!sortKey) return list;
+  const arr = [...list];
+  arr.sort((a, b) => {
+    let va, vb;
+    if (sortKey === "disk") {
+      va = a.disk_total_gb ? 1 - a.disk_free_gb / a.disk_total_gb : -1;
+      vb = b.disk_total_gb ? 1 - b.disk_free_gb / b.disk_total_gb : -1;
+    } else if (sortKey === "ram") {
+      va = a.ram_total_gb ? a.ram_used_gb / a.ram_total_gb : -1;
+      vb = b.ram_total_gb ? b.ram_used_gb / b.ram_total_gb : -1;
+    } else {
+      va = a[sortKey]; vb = b[sortKey];
+    }
+    if (va == null) va = sortAsc ? Infinity : -Infinity;
+    if (vb == null) vb = sortAsc ? Infinity : -Infinity;
+    if (typeof va === "string") return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return sortAsc ? va - vb : vb - va;
+  });
+  return arr;
+}
+
+$("headerRow").addEventListener("click", (e) => {
+  const th = e.target.closest("th[data-key]");
+  if (!th) return;
+  const k = th.dataset.key;
+  if (sortKey === k) sortAsc = !sortAsc;
+  else { sortKey = k; sortAsc = true; }
+  renderArrows();
+  renderTable();
+});
+
+function renderArrows() {
+  document.querySelectorAll("#headerRow th[data-key]").forEach(th => {
+    const a = th.querySelector(".arrow");
+    a.textContent = th.dataset.key === sortKey
+      ? (sortAsc ? " \u25B2" : " \u25BC") : "";
+  });
+}
+
+/* =========  disk bar  ========= */
+function diskHtml(item) {
+  if (item.disk_total_gb == null) return "\u2014";
+  const f = item.disk_free_gb, tot = item.disk_total_gb;
+  const pct = Math.min(100, Math.max(0, ((tot - f) / tot) * 100));
+  let c = "var(--ok)";
+  if (pct > 95) c = "var(--bad)";
+  else if (pct > 70) c = "#f59e0b";
+  return '<div class="disk-bar">' +
+    '<div class="disk-track"><div class="disk-fill" style="width:' +
+    pct.toFixed(0) + '%;background:' + c + '"></div></div>' +
+    '<span class="disk-text">' + f + '/' + tot + ' GB</span></div>';
+}
+
+/* =========  ram bar  ========= */
+function ramHtml(item) {
+  if (item.ram_total_gb == null) return "\u2014";
+  const u = item.ram_used_gb, tot = item.ram_total_gb;
+  const pct = Math.min(100, Math.max(0, (u / tot) * 100));
+  let c = "var(--ok)";
+  if (pct > 90) c = "var(--bad)";
+  else if (pct > 70) c = "#f59e0b";
+  return '<div class="disk-bar">' +
+    '<div class="disk-track"><div class="disk-fill" style="width:' +
+    pct.toFixed(0) + '%;background:' + c + '"></div></div>' +
+    '<span class="disk-text">' + u + '/' + tot + ' GB</span></div>';
+}
+
+/* =========  row  ========= */
+function rowTemplate(item) {
+  const cls = item.status === "up" ? "up" : "down";
+  const sn = esc(item.name);
+  const cpuVal = fmt(item.cpu_percent, 2);
+  const cpuStyle = item.cpu_percent != null
+    ? ' style="color:' + cpuColor(item.cpu_percent) + ';font-weight:600"' : '';
+  const isLocal = item.is_local;
+  const localAttr = isLocal ? ' data-local="1"' : '';
+  const nameCell = '<td><span class="editable-name" data-server="' +
+    sn + '"' + localAttr + '>' + sn + '</span></td>';
+  const ifaceVal = esc(item.interface || '\u2014');
+  const hasErr = item.error ? true : false;
+  const errCls = hasErr ? ' err-active' : '';
+  const errTitle = hasErr ? esc(item.error) : t('tip_no_err');
+  const ifaceTitle = t('tip_iface') + ': ' + ifaceVal;
+  const logName = esc(item._origName || item.name);
+  const actionsCell = '<td>' +
+    '<button class="btn small err-tip' + errCls + '" type="button" title="' + errTitle + '">E</button> ' +
+    '<button class="btn small iface-tip" type="button" title="' + ifaceTitle + '">I</button> ' +
+    '<button class="btn small log-btn act-tip" type="button" data-server-name="' +
+    logName + '" title="' + t('tip_log') + '">L</button> ' +
+    '<button class="btn small delete-btn act-tip" type="button" data-server-name="' +
+    sn + '"' + localAttr + ' title="' + t('tip_delete') + '">X</button></td>';
+  return '<tr>' +
+    nameCell +
+    '<td>' + esc(item.host) + '</td>' +
+    '<td><span class="status ' + cls + '">' + item.status.toUpperCase() + '</span></td>' +
+    '<td>' + (item.uptime_days != null ? item.uptime_days + 'd' : '\u2014') + '</td>' +
+    '<td>' + fmt(item.ping_ms, 1) + '</td>' +
+    '<td' + cpuStyle + '>' + cpuVal + '</td>' +
+    '<td>' + ramHtml(item) + '</td>' +
+    '<td>' + diskHtml(item) + '</td>' +
+    '<td>' + fmt(item.rx_mbps, 3) + '</td>' +
+    '<td>' + fmt(item.tx_mbps, 3) + '</td>' +
+    actionsCell + '</tr>';
+}
+
+function renderTable() {
+  let data = sorted(serverData);
+  if (!showLocal) {
+    data = data.filter(s => !s.is_local);
+  }
+  const cn = localStorage.getItem("localServerName");
+  if (cn && showLocal) {
+    data = data.map(s => s.is_local ? {...s, _origName: s.name, name: cn} : s);
+  }
+  rows.innerHTML = data.map(rowTemplate).join("");
+}
+
+function showMeta(data) {
+  if (!data) return;
+  const gen = new Date(data.generated_at).toLocaleString();
+  meta.textContent = t("updated") + ": " + gen +
+    " | " + t("interval") + ": " + data.refresh_interval_sec + "s";
+}
+
+/* =========  inline rename  ========= */
+rows.addEventListener("dblclick", (e) => {
+  const span = e.target.closest(".editable-name");
+  if (!span) return;
+  const oldN = span.dataset.server;
+  const isLoc = span.dataset.local === "1";
+  const inp = document.createElement("input");
+  inp.className = "edit-input";
+  inp.value = oldN;
+  span.replaceWith(inp);
+  inp.focus(); inp.select();
+  let done = false;
+  async function commit() {
+    if (done) return; done = true;
+    const nw = inp.value.trim();
+    if (!nw || nw === oldN) { renderTable(); return; }
+    if (isLoc) {
+      localStorage.setItem("localServerName", nw);
+      formMsg.textContent = t("renamed") + ": " + oldN + " \u2192 " + nw;
+      formMsg.className = "msg ok";
+      renderTable();
+      return;
+    }
+    try {
+      const r = await fetch("/api/servers/" + encodeURIComponent(oldN), {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({new_name: nw}),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || "HTTP " + r.status);
+      formMsg.textContent = t("renamed") + ": " + oldN + " \u2192 " + nw;
+      formMsg.className = "msg ok";
+      const it = serverData.find(s => s.name === oldN);
+      if (it) it.name = nw;
+    } catch (err) {
+      formMsg.textContent = t("error_prefix") + ": " + err.message;
+      formMsg.className = "msg bad";
+    }
+    renderTable();
+  }
+  inp.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") commit();
+    if (ev.key === "Escape") renderTable();
+  });
+  inp.addEventListener("blur", commit);
+});
+
+/* =========  toggle forms  ========= */
+toggleAdd.addEventListener("click", () => {
+  addForm.classList.toggle("hidden");
+  botForm.classList.add("hidden");
+  secPanel.classList.add("hidden");
+  formMsg.textContent = ""; formMsg.className = "msg";
+});
+toggleBot.addEventListener("click", async () => {
+  botForm.classList.toggle("hidden");
+  addForm.classList.add("hidden");
+  secPanel.classList.add("hidden");
+  if (!botForm.classList.contains("hidden")) {
+    try {
+      const r = await fetch("/api/bot");
+      const d = await r.json();
+      $('botEnabled').checked = d.enabled;
+      $('botToken').value = '';
+      if (d.token_set) {
+        $('botToken').placeholder = t('bot_token_set');
+      } else {
+        $('botToken').placeholder = 'Telegram bot token';
+      }
+      $('botChatId').value = d.chat_id || '';
+      $('botNotifyDown').checked = d.notify_down;
+      $('botCpuThreshold').value = d.notify_cpu_threshold ?? '';
+      $('botPingThreshold').value = d.notify_ping_threshold ?? '';
+      $('botDiskThreshold').value = d.notify_disk_threshold ?? '';
+      $('botRxThreshold').value = d.notify_rx_threshold ?? '';
+      $('botTxThreshold').value = d.notify_tx_threshold ?? '';
+      $('botDelay').value = d.notify_delay ?? 1;
+    } catch(_) {}
+  }
+});
+bsToggle.addEventListener("change", () => {
+  const on = bsToggle.checked;
+  bsFields.forEach(f => f.classList.toggle("hidden", !on));
+  if (on && genToggle.checked) pkFields.forEach(f => f.classList.add("hidden"));
+});
+genToggle.addEventListener("change", () => {
+  pkFields.forEach(f => f.classList.toggle("hidden", genToggle.checked));
+});
+
+/* =========  add server  ========= */
+addForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const payload = {
+    name: $("srvName").value,
+    host: $("host").value,
+    user: $("user").value,
+    port: Number($("port").value || 22),
+    interface: $("iface").value || null,
+    client_key: $("clientKey").value || null,
+    bootstrap_with_root: bsToggle.checked,
+    root_user: $("rootUser").value || null,
+    root_password: $("rootPassword").value || null,
+    public_key: $("publicKey").value || null,
+    generate_key: bsToggle.checked && genToggle.checked,
+  };
+  formMsg.textContent = payload.bootstrap_with_root ? t("setting_up") : t("saving");
+  formMsg.className = "msg";
+  try {
+    const r = await fetch("/api/servers", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || "HTTP " + r.status);
+    formMsg.textContent = t("server_added");
+    formMsg.className = "msg ok";
+    addForm.reset();
+    bsFields.forEach(f => f.classList.add("hidden"));
+    $("port").value = "22";
+    $("user").value = "monitor";
+    await refresh();
+  } catch (err) {
+    formMsg.textContent = t("error_prefix") + ": " + err.message;
+    formMsg.className = "msg bad";
+  }
+});
+
+/* =========  save bot  ========= */
+botForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const nv = (id) => { const v = $(id).value; return v === '' ? null : Number(v); };
+  const payload = {
+    enabled: $("botEnabled").checked,
+    token: $("botToken").value,
+    chat_id: $("botChatId").value,
+    notify_down: $("botNotifyDown").checked,
+    notify_cpu_threshold: nv("botCpuThreshold"),
+    notify_ping_threshold: nv("botPingThreshold"),
+    notify_disk_threshold: nv("botDiskThreshold"),
+    notify_rx_threshold: nv("botRxThreshold"),
+    notify_tx_threshold: nv("botTxThreshold"),
+    notify_delay: Math.max(1, Number($('botDelay').value) || 1),
+  };
+  botMsg.textContent = t("saving"); botMsg.className = "msg";
+  try {
+    const r = await fetch("/api/bot", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || "HTTP " + r.status);
+    botMsg.textContent = t("bot_saved"); botMsg.className = "msg ok";
+  } catch (err) {
+    botMsg.textContent = t("error_prefix") + ": " + err.message;
+    botMsg.className = "msg bad";
+  }
+});
+
+/* =========  download log  ========= */
+rows.addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".log-btn");
+  if (!btn) return;
+  const sn = btn.dataset.serverName;
+  if (!sn) return;
+  const a = document.createElement("a");
+  a.href = "/api/logs/" + encodeURIComponent(sn);
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+
+/* =========  delete with confirm overlay  ========= */
+let pendingDelete = null;
+let pendingDeleteLocal = false;
+rows.addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".delete-btn");
+  if (!btn) return;
+  const sn = btn.dataset.serverName;
+  if (!sn) return;
+  pendingDelete = sn;
+  pendingDeleteLocal = btn.dataset.local === "1";
+  const bodyKey = pendingDeleteLocal
+    ? "confirm_hide_body" : "confirm_delete_body";
+  confText.innerHTML = '<b>' + t("confirm_delete") + " '" +
+    esc(sn) + "'?</b><br>" + t(bodyKey);
+  confYes.textContent = t("confirm_yes");
+  confNo.textContent = t("confirm_no");
+  overlay.classList.remove("hidden");
+});
+
+confNo.addEventListener("click", () => {
+  overlay.classList.add("hidden");
+  pendingDelete = null;
+  pendingDeleteLocal = false;
+});
+
+overlay.addEventListener("click", (e) => {
+  if (e.target === overlay) {
+    overlay.classList.add("hidden");
+    pendingDelete = null;
+    pendingDeleteLocal = false;
+  }
+});
+
+confYes.addEventListener("click", async () => {
+  overlay.classList.add("hidden");
+  const sn = pendingDelete;
+  const isLoc = pendingDeleteLocal;
+  pendingDelete = null;
+  pendingDeleteLocal = false;
+  if (!sn) return;
+  if (isLoc) {
+    showLocal = false;
+    localStorage.setItem("showLocal", "false");
+    formMsg.textContent = "'" + sn + "' " + t("server_deleted");
+    formMsg.className = "msg ok";
+    updateInfoBtn();
+    renderTable();
+    return;
+  }
+  formMsg.textContent = t("deleting"); formMsg.className = "msg";
+  try {
+    const r = await fetch("/api/servers/" + encodeURIComponent(sn), {method: "DELETE"});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || "HTTP " + r.status);
+    formMsg.textContent = "'" + sn + "' " + t("server_deleted");
+    formMsg.className = "msg ok";
+    await refresh();
+  } catch (err) {
+    formMsg.textContent = t("error_prefix") + ": " + err.message;
+    formMsg.className = "msg bad";
+  }
+});
+
+/* =========  refresh  ========= */
+async function refresh() {
+  try {
+    const r = await fetch("/api/metrics", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    if (!data.ready) {
+      meta.textContent = t("collecting");
+      if (data.servers && data.servers.length) {
+        serverData = data.servers;
+        renderTable();
+      }
+      return;
+    }
+    serverData = data.servers;
+    lastMeta = data;
+    renderTable();
+    showMeta(data);
+    /* sync interval selector with server value */
+    const selEl = $("intervalSelect");
+    if (selEl && String(data.refresh_interval_sec) !== selEl.value) {
+      selEl.value = String(data.refresh_interval_sec);
+    }
+    const next = data.refresh_interval_sec * 1000;
+    if (next !== intervalMs) {
+      intervalMs = next;
+      clearInterval(window.__di);
+      window.__di = setInterval(refresh, intervalMs);
+    }
+  } catch (err) {
+    meta.textContent = t("error_update") + ": " + err.message;
+  }
+}
+
+/* =========  interval selector  ========= */
+const intervalSel = $("intervalSelect");
+intervalSel.addEventListener("change", async () => {
+  const v = Number(intervalSel.value);
+  try {
+    const r = await fetch("/api/interval", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({interval: v}),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    intervalMs = v * 1000;
+    clearInterval(window.__di);
+    window.__di = setInterval(refresh, intervalMs);
+  } catch (_) {}
+});
+
+applyLang();
+
+/* =========  auth check  ========= */
+let isAuthed = false;
+
+async function checkAuth() {
+  try {
+    const r = await fetch("/api/auth/status");
+    const d = await r.json();
+    if (d.has_password && !d.logged_in) {
+      loginOvl.classList.remove("hidden");
+      isAuthed = false;
+      logoutBtn.classList.add("hidden");
+      return;
+    }
+    loginOvl.classList.add("hidden");
+    isAuthed = true;
+    logoutBtn.classList.toggle("hidden", !d.has_password);
+  } catch(_) {
+    isAuthed = true;
+    loginOvl.classList.add("hidden");
+  }
+}
+
+$("loginBtn").addEventListener("click", doLogin);
+$("loginPassword").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") doLogin();
+});
+
+async function doLogin() {
+  const pw = $("loginPassword").value;
+  const errEl = $("loginErr");
+  errEl.textContent = "";
+  if (!pw) return;
+  try {
+    const r = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({password: pw}),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      $("loginPassword").value = "";
+      loginOvl.classList.add("hidden");
+      isAuthed = true;
+      logoutBtn.classList.remove("hidden");
+      refresh();
+      return;
+    }
+    if (r.status === 429) {
+      errEl.textContent = t("login_blocked") + ": " + d.detail;
+    } else if (r.status === 403) {
+      errEl.textContent = t("login_wrong");
+      if (d.remaining != null) {
+        errEl.textContent += " (" + t("login_remaining") + ": " + d.remaining + ")";
+      }
+    } else {
+      errEl.textContent = d.detail || "Error";
+    }
+  } catch(e) {
+    errEl.textContent = e.message;
+  }
+}
+
+logoutBtn.addEventListener("click", async () => {
+  try {
+    await fetch("/api/auth/logout", {method: "POST"});
+  } catch(_) {}
+  isAuthed = false;
+  logoutBtn.classList.add("hidden");
+  loginOvl.classList.remove("hidden");
+  $("loginPassword").value = "";
+  $("loginErr").textContent = "";
+});
+
+/* =========  security panel  ========= */
+toggleSec.addEventListener("click", async () => {
+  secPanel.classList.toggle("hidden");
+  addForm.classList.add("hidden");
+  botForm.classList.add("hidden");
+  if (!secPanel.classList.contains("hidden")) {
+    try {
+      const r = await fetch("/api/auth/settings");
+      const d = await r.json();
+      $("secCurrentPassword").value = "";
+      $("secPassword").value = "";
+      $("secPasswordConfirm").value = "";
+      $("secNetworks").value = (d.allowed_networks || []).join(", ");
+      secMsg.textContent = d.has_password ? t("sec_pw_set") : t("sec_pw_not_set");
+      secMsg.className = d.has_password ? "msg ok" : "msg";
+      // render history
+      const hist = d.history || [];
+      let h = '<table><thead><tr>' +
+        '<th>' + t("sec_col_time") + '</th>' +
+        '<th>' + t("sec_col_ip") + '</th>' +
+        '<th>' + t("sec_col_country") + '</th>' +
+        '<th>' + t("sec_col_ua") + '</th></tr></thead><tbody>';
+      for (const e of hist.slice().reverse()) {
+        h += '<tr><td>' + esc(e.time) + '</td>' +
+          '<td>' + esc(e.ip) + '</td>' +
+          '<td>' + esc(e.country) + '</td>' +
+          '<td>' + esc(e.ua) + '</td></tr>';
+      }
+      h += '</tbody></table>';
+      $("secHistory").innerHTML = '<div style="padding:6px 8px;font-weight:600;font-size:13px">' +
+        t("sec_history_title") + '</div>' + h +
+        '<div style="padding:4px 8px;font-size:11px;color:var(--muted)">' +
+        t("sec_reset_hint") + '</div>';
+    } catch(_) {}
+  }
+});
+
+$("secSave").addEventListener("click", async () => {
+  const curPw = $("secCurrentPassword").value;
+  const pw = $("secPassword").value;
+  const pw2 = $("secPasswordConfirm").value;
+  if (pw && pw !== pw2) {
+    secMsg.textContent = t("sec_pw_mismatch");
+    secMsg.className = "msg bad";
+    return;
+  }
+  const nets = $("secNetworks").value
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+  const payload = {
+    current_password: curPw || null,
+    password: pw || null,
+    allowed_networks: nets,
+  };
+  secMsg.textContent = t("saving"); secMsg.className = "msg";
+  try {
+    const r = await fetch("/api/auth/settings", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Error");
+    secMsg.textContent = t("sec_saved");
+    secMsg.className = "msg ok";
+    $("secCurrentPassword").value = "";
+    $("secPassword").value = "";
+    $("secPasswordConfirm").value = "";
+    checkAuth();
+  } catch(e) {
+    secMsg.textContent = t("error_prefix") + ": " + e.message;
+    secMsg.className = "msg bad";
+  }
+});
+
+meta.textContent = t("loading");
+checkAuth();
+refresh();
+window.__di = setInterval(refresh, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+refresh_interval_sec: 5
+
+ssh:
+  known_hosts: ~/.ssh/known_hosts
+  client_keys:
+    - ~/.ssh/id_ed25519
+  connect_timeout: 5
+  command_timeout: 6
+
+servers:
+  - name: app-prod-1
+    host: 10.10.1.11
+    port: 22
+    user: monitor
+    interface: eth0
+
+  - name: db-prod-1
+    host: 10.10.1.12
+    port: 22
+    user: monitor
+    interface: eth0
