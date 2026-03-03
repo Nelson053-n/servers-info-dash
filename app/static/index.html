@@ -804,8 +804,8 @@ function rowTemplate(item) {
     '<td' + cpuStyle + '>' + cpuVal + '</td>' +
     '<td>' + ramHtml(item) + '</td>' +
     '<td>' + diskHtml(item) + '</td>' +
-    '<td>' + fmt(item.rx_mbps, 3) + '</td>' +
-    '<td>' + fmt(item.tx_mbps, 3) + '</td>' +
+    '<td>' + fmt(item.rx_mbps, 2) + '</td>' +
+    '<td>' + fmt(item.tx_mbps, 2) + '</td>' +
     '<td><span class="small-num">' + traffic30dText(item.traffic_1d_gb) + '</span></td>' +
     '<td><span class="small-num">' + traffic30dText(item.traffic_30d_gb) + '</span></td>' +
     actionsCell + '</tr>';
