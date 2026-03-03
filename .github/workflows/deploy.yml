@@ -26,5 +26,14 @@ jobs:
             git reset --hard origin/main
             /opt/servers-info-dash/.venv/bin/pip install -r requirements.txt
             systemctl restart servers-info-dash.service
-            systemctl is-active --quiet servers-info-dash.service
-            curl -kfsS https://127.0.0.1/ > /dev/null || curl -fsS http://127.0.0.1:8000/ > /dev/null
+            for i in $(seq 1 30); do
+              if systemctl is-active --quiet servers-info-dash.service; then
+                if curl -fsS http://127.0.0.1:8000/ > /dev/null; then
+                  exit 0
+                fi
+              fi
+              sleep 1
+            done
+            systemctl --no-pager --full status servers-info-dash.service || true
+            journalctl -u servers-info-dash --no-pager -n 120 || true
+            exit 1
