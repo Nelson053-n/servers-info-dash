@@ -35,7 +35,7 @@ jobs:
 
           path = Path("config/servers.example.yaml")
           data = yaml.safe_load(path.read_text(encoding="utf-8"))
-          required = {"refresh_interval_sec", "persistent_ssh", "ssh", "servers"}
+          required = {"refresh_interval_sec", "ssh", "servers"}
           missing = required.difference(data.keys())
           if missing:
               raise SystemExit(f"Missing keys in {path}: {sorted(missing)}")
