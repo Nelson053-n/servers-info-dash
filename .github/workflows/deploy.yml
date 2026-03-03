@@ -1,0 +1,30 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          script_stop: true
+          script: |
+            set -e
+            cd /opt/servers-info-dash
+            git config --global --add safe.directory /opt/servers-info-dash
+            git fetch origin main
+            git reset --hard origin/main
+            /opt/servers-info-dash/.venv/bin/pip install -r requirements.txt
+            systemctl restart servers-info-dash.service
+            systemctl is-active --quiet servers-info-dash.service
+            curl -kfsS https://127.0.0.1/ > /dev/null || curl -fsS http://127.0.0.1:8000/ > /dev/null

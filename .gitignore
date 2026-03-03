@@ -16,6 +16,9 @@ config/auth.yaml
 # Runtime logs (contain server IPs and metrics)
 logs/
 
+# Local deployment keys (never commit)
+.github/deploy/
+
 # OS
 Thumbs.db
 .DS_Store
