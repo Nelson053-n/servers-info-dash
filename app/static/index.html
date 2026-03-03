@@ -58,6 +58,9 @@ h1{margin:0;font-size:24px;font-weight:600}
   gap:6px;z-index:50;box-shadow:0 6px 20px rgba(0,0,0,.35);
   display:none;flex-direction:row}
 .color-dropdown.open{display:flex}
+/* smaller font for traffic columns */
+th[data-key="traffic_1d_gb"], th[data-key="traffic_30d_gb"] { font-size: 0.9em; }
+.small-num { font-size: 0.85em; }
 .cdot{width:22px;height:22px;border-radius:50%;border:2px solid transparent;
   cursor:pointer;transition:border-color .15s,transform .15s}
 .cdot:hover{transform:scale(1.15)}
@@ -583,11 +586,11 @@ function traffic30dText(v) {
     return tb + unitTb;
   }
   if (gbValue < 1) {
-    const mb = (gbValue * 1024).toFixed(2);
+    const mb = Math.round(gbValue * 1024);
     const unitMb = lang === "ru" ? " Мб" : " MB";
     return mb + unitMb;
   }
-  const gb = gbValue.toFixed(2);
+  const gb = Math.round(gbValue);
   const unitGb = lang === "ru" ? " Гб" : " GB";
   return gb + unitGb;
 }
@@ -802,8 +805,8 @@ function rowTemplate(item) {
     '<td>' + diskHtml(item) + '</td>' +
     '<td>' + fmt(item.rx_mbps, 3) + '</td>' +
     '<td>' + fmt(item.tx_mbps, 3) + '</td>' +
-    '<td>' + traffic30dText(item.traffic_1d_gb) + '</td>' +
-    '<td>' + traffic30dText(item.traffic_30d_gb) + '</td>' +
+    '<td><span class="small-num">' + traffic30dText(item.traffic_1d_gb) + '</span></td>' +
+    '<td><span class="small-num">' + traffic30dText(item.traffic_30d_gb) + '</span></td>' +
     actionsCell + '</tr>';
 }
 
