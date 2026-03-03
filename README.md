@@ -15,7 +15,7 @@ No agents on remote hosts — only a locked-down `monitor` user with read access
 
 | Category | Details |
 |---|---|
-| **Metrics** | CPU %, RAM (used / total GB), Disk (free / total GB + progress bar), Network RX / TX Mbps, Ping ms, Uptime days |
+| **Metrics** | CPU %, RAM (used / total GB), Disk (free / total GB + progress bar), Network RX / TX Mbps, 30-day traffic (RX+TX volume), Ping ms, Uptime days |
 | **Local host** | Dashboard server metrics via `psutil` — no SSH needed |
 | **SSH modes** | **Normal** (new connection each cycle) or **Persistent** (connection pool with keepalive & auto-reconnect) |
 | **Telegram bot** | Down / CPU / Ping / Disk / RX / TX threshold alerts with configurable delay, recovery notifications, HTML-formatted messages |
@@ -149,6 +149,17 @@ All remote metrics are collected in a **single SSH command** per server per cycl
 **Error tolerance:** up to 5 consecutive SSH failures are absorbed using cached data before marking a server as DOWN.
 
 **Network interface:** auto-detected (highest-traffic non-loopback) or user-specified.
+
+### 30-day traffic column
+
+- Source: per-server CSV logs in `logs/`, only files from last 30 days are included.
+- Formula per log row: `((rx_mbps + tx_mbps) * interval_sec) / 8 / 1000` → GB.
+- Final value: sum of all included rows for the server.
+- Refresh: recalculated with a 5-minute backend cache.
+- Display units in UI:
+  - `< 1 GB` → `MB`
+  - `1..1024 GB` → `GB`
+  - `> 1024 GB` → `TB`
 
 ---
 
