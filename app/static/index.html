@@ -277,6 +277,7 @@ tr:last-child td{border-bottom:none}
         <th data-key="disk"><span data-i="col_disk"></span><span class="arrow"></span></th>
         <th data-key="rx_mbps">RX<span class="arrow"></span></th>
         <th data-key="tx_mbps">TX<span class="arrow"></span></th>
+        <th data-key="traffic_1d_gb"><span data-i="col_1d"></span><span class="arrow"></span></th>
         <th data-key="traffic_30d_gb"><span data-i="col_30d"></span><span class="arrow"></span></th>
         <th data-i="col_actions"></th>
       </tr>
@@ -327,6 +328,7 @@ const I = {
     col_ram: "RAM",
     col_disk: "Диск",
     col_30d: "30 дней",
+    col_1d: "За день",
     col_uptime: "Uptime",
     col_iface: "Интерфейс",
     col_error: "Ошибка",
@@ -417,6 +419,7 @@ const I = {
     col_ram: "RAM",
     col_disk: "Disk",
     col_30d: "30 days",
+    col_1d: "1 day",
     col_uptime: "Uptime",
     col_iface: "Interface",
     col_error: "Error",
@@ -799,6 +802,7 @@ function rowTemplate(item) {
     '<td>' + diskHtml(item) + '</td>' +
     '<td>' + fmt(item.rx_mbps, 3) + '</td>' +
     '<td>' + fmt(item.tx_mbps, 3) + '</td>' +
+    '<td>' + traffic30dText(item.traffic_1d_gb) + '</td>' +
     '<td>' + traffic30dText(item.traffic_30d_gb) + '</td>' +
     actionsCell + '</tr>';
 }

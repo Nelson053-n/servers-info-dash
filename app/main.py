@@ -1256,6 +1256,7 @@ _LOGS_DIR = Path("logs")
 _LOGS_DIR.mkdir(exist_ok=True)
 _LOG_RETENTION_DAYS = 30
 _TRAFFIC_30D_CACHE_TTL_SEC = 300
+_TRAFFIC_1D_CACHE_TTL_SEC = 60
 
 _CSV_COLUMNS = [
     "timestamp", "name", "host", "status",
@@ -1266,6 +1267,14 @@ _CSV_COLUMNS = [
 ]
 
 _traffic_30d_cache: dict[str, Any] = {
+    "expires_at": dt.datetime.fromtimestamp(
+        0,
+        tz=dt.timezone.utc,
+    ),
+    "values": {},
+}
+
+_traffic_1d_cache: dict[str, Any] = {
     "expires_at": dt.datetime.fromtimestamp(
         0,
         tz=dt.timezone.utc,
@@ -1404,6 +1413,70 @@ def _calculate_traffic_30d_gb() -> dict[str, float]:
     }
 
 
+def _calculate_traffic_1d_gb() -> dict[str, float]:
+    """Calculate per-server RX+TX traffic for the last 1 day."""
+    cutoff = dt.date.today() - dt.timedelta(days=1)
+    totals_raw: dict[str, float] = {}
+
+    for file_path in _LOGS_DIR.glob("*.csv"):
+        parts = file_path.stem.rsplit("_", 1)
+        if len(parts) != 2:
+            continue
+        safe_name, date_part = parts
+        try:
+            file_date = dt.date.fromisoformat(date_part)
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            continue
+        if file_path.stat().st_size <= 0:
+            continue
+
+        with file_path.open(encoding="utf-8", newline="") as fh:
+            reader = csv.reader(fh)
+            _ = next(reader, None)  # header
+            for values in reader:
+                if len(values) >= 15:
+                    row_name = values[1] if len(values) > 1 else ""
+                    rx_raw = values[11] if len(values) > 11 else ""
+                    tx_raw = values[12] if len(values) > 12 else ""
+                elif len(values) >= 12:
+                    row_name = values[1] if len(values) > 1 else ""
+                    rx_raw = values[8] if len(values) > 8 else ""
+                    tx_raw = values[9] if len(values) > 9 else ""
+                else:
+                    continue
+
+                row_key = (
+                    _safe_filename(row_name)
+                    if row_name
+                    else safe_name
+                )
+                try:
+                    rx = float(rx_raw or 0.0)
+                except (TypeError, ValueError):
+                    rx = 0.0
+                try:
+                    tx = float(tx_raw or 0.0)
+                except (TypeError, ValueError):
+                    tx = 0.0
+                if rx <= 0 and tx <= 0:
+                    continue
+                row_total = totals_raw.get(row_key, 0.0)
+                period_megabits = (
+                    (rx + tx) * cfg.refresh_interval_sec
+                )
+                period_megabytes = period_megabits / 8.0
+                period_gigabytes = period_megabytes / 1000.0
+                row_total += period_gigabytes
+                totals_raw[row_key] = row_total
+
+    return {
+        key: round(value, 3)
+        for key, value in totals_raw.items()
+    }
+
+
 def _get_traffic_30d_gb_cached() -> dict[str, float]:
     """Return cached 30-day traffic map, recomputing every 5 minutes."""
     now = dt.datetime.now(dt.timezone.utc)
@@ -1421,6 +1494,23 @@ def _get_traffic_30d_gb_cached() -> dict[str, float]:
     return values
 
 
+def _get_traffic_1d_gb_cached() -> dict[str, float]:
+    """Return cached 1-day traffic map, recomputing every minute."""
+    now = dt.datetime.now(dt.timezone.utc)
+    expires_at = _traffic_1d_cache.get("expires_at")
+    if isinstance(expires_at, dt.datetime) and now < expires_at:
+        values = _traffic_1d_cache.get("values")
+        if isinstance(values, dict) and values:
+            return values
+
+    values = _calculate_traffic_1d_gb()
+    _traffic_1d_cache["values"] = values
+    _traffic_1d_cache["expires_at"] = now + dt.timedelta(
+        seconds=_TRAFFIC_1D_CACHE_TTL_SEC,
+    )
+    return values
+
+
 def _attach_traffic_30d(
     servers: list[dict[str, Any]],
 ) -> None:
@@ -1428,6 +1518,15 @@ def _attach_traffic_30d(
     for srv in servers:
         safe_name = _safe_filename(srv.get("name", ""))
         srv["traffic_30d_gb"] = traffic_map.get(safe_name, 0.0)
+
+
+def _attach_traffic_1d(
+    servers: list[dict[str, Any]],
+) -> None:
+    traffic_map = _get_traffic_1d_gb_cached()
+    for srv in servers:
+        safe_name = _safe_filename(srv.get("name", ""))
+        srv["traffic_1d_gb"] = traffic_map.get(safe_name, 0.0)
 
 
 _cached_metrics: dict[str, Any] = {
@@ -1656,6 +1755,7 @@ async def _background_collector() -> None:
         try:
             data = await collector.collect_all()
             _attach_traffic_30d(data["servers"])
+            _attach_traffic_1d(data["servers"])
             data["ready"] = True
             async with _metrics_lock:
                 _cached_metrics = data
