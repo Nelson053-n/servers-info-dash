@@ -277,6 +277,7 @@ tr:last-child td{border-bottom:none}
         <th data-key="disk"><span data-i="col_disk"></span><span class="arrow"></span></th>
         <th data-key="rx_mbps">RX<span class="arrow"></span></th>
         <th data-key="tx_mbps">TX<span class="arrow"></span></th>
+        <th data-key="traffic_30d_gb"><span data-i="col_30d"></span><span class="arrow"></span></th>
         <th data-i="col_actions"></th>
       </tr>
     </thead>
@@ -325,6 +326,7 @@ const I = {
     col_cpu: "CPU %",
     col_ram: "RAM",
     col_disk: "Диск",
+    col_30d: "30 дней",
     col_uptime: "Uptime",
     col_iface: "Интерфейс",
     col_error: "Ошибка",
@@ -414,6 +416,7 @@ const I = {
     col_cpu: "CPU %",
     col_ram: "RAM",
     col_disk: "Disk",
+    col_30d: "30 days",
     col_uptime: "Uptime",
     col_iface: "Interface",
     col_error: "Error",
@@ -567,6 +570,24 @@ let showLocal = localStorage.getItem("showLocal") !== "false";
 /* =========  helpers  ========= */
 const fmt = (v, d) =>
   v == null ? "\u2014" : Number(v).toFixed(d);
+
+function traffic30dText(v) {
+  if (v == null) return "\u2014";
+  const gbValue = Number(v);
+  if (gbValue > 1024) {
+    const tb = (gbValue / 1024).toFixed(2);
+    const unitTb = lang === "ru" ? " Тб" : " TB";
+    return tb + unitTb;
+  }
+  if (gbValue < 1) {
+    const mb = (gbValue * 1024).toFixed(2);
+    const unitMb = lang === "ru" ? " Мб" : " MB";
+    return mb + unitMb;
+  }
+  const gb = gbValue.toFixed(2);
+  const unitGb = lang === "ru" ? " Гб" : " GB";
+  return gb + unitGb;
+}
 
 const esc = (v) => {
   if (v == null) return "";
@@ -778,6 +799,7 @@ function rowTemplate(item) {
     '<td>' + diskHtml(item) + '</td>' +
     '<td>' + fmt(item.rx_mbps, 3) + '</td>' +
     '<td>' + fmt(item.tx_mbps, 3) + '</td>' +
+    '<td>' + traffic30dText(item.traffic_30d_gb) + '</td>' +
     actionsCell + '</tr>';
 }
 
