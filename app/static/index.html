@@ -62,6 +62,7 @@ h1{margin:0;font-size:24px;font-weight:600}
 table, table th, table td { font-size: 0.85em; }
 th[data-key="traffic_1d_gb"], th[data-key="traffic_30d_gb"] { font-size: 0.85em; }
 .small-num { font-size: 0.85em; }
+.traffic-num { font-size: 1.05em; font-weight:600; }
 .cdot{width:22px;height:22px;border-radius:50%;border:2px solid transparent;
   cursor:pointer;transition:border-color .15s,transform .15s}
 .cdot:hover{transform:scale(1.15)}
@@ -806,8 +807,8 @@ function rowTemplate(item) {
     '<td>' + diskHtml(item) + '</td>' +
     '<td>' + fmt(item.rx_mbps, 2) + '</td>' +
     '<td>' + fmt(item.tx_mbps, 2) + '</td>' +
-    '<td><span class="small-num">' + traffic30dText(item.traffic_1d_gb) + '</span></td>' +
-    '<td><span class="small-num">' + traffic30dText(item.traffic_30d_gb) + '</span></td>' +
+    '<td><span class="traffic-num">' + traffic30dText(item.traffic_1d_gb) + '</span></td>' +
+    '<td><span class="traffic-num">' + traffic30dText(item.traffic_30d_gb) + '</span></td>' +
     actionsCell + '</tr>';
 }
 
