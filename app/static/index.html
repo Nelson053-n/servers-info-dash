@@ -137,10 +137,51 @@
         }
 
         function ServersCard(){
+          const { useState, useEffect } = React;
+          const [local, setLocal] = useState(null);
+          const [loading, setLoading] = useState(true);
+          const [error, setError] = useState(null);
+          useEffect(() => {
+            let mounted = true;
+            async function fetchMetrics(){
+              setLoading(true); setError(null);
+              try{
+                const res = await fetch('/api/metrics', { cache: 'no-store' });
+                if(!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                // collector returns local server as first element
+                const servers = data.servers || [];
+                const localServer = servers.length ? servers[0] : null;
+                if(mounted) setLocal({ meta: data, server: localServer });
+              }catch(err){
+                if(mounted) setError(String(err));
+              }finally{
+                if(mounted) setLoading(false);
+              }
+            }
+            fetchMetrics();
+            // refresh based on refresh_interval_sec or every 5s
+            const interval = setInterval(()=>fetchMetrics(), 5000);
+            return ()=>{ mounted = false; clearInterval(interval); };
+          }, []);
+
           return React.createElement(Card, null,
             React.createElement(CardContent, null,
-              React.createElement(Typography, { variant:'h5', gutterBottom:true }, 'Серверы'),
-              React.createElement(Box, { sx:{ mt:2 } }, React.createElement(Typography, { color:'text.secondary' }, 'Серверы будут отображены здесь.'))
+              React.createElement(Typography, { variant:'h5', gutterBottom:true }, 'Локальный сервер'),
+              loading && React.createElement(Typography, { color:'text.secondary' }, 'Загрузка...'),
+              error && React.createElement(Typography, { color:'error' }, error),
+              !loading && !error && local && local.server && React.createElement(Box, { sx:{ mt:1 } },
+                React.createElement(Typography, { variant:'subtitle1' }, local.server.name || '—'),
+                React.createElement(Typography, { color:'text.secondary' }, `Host: ${local.server.host || '—'}`),
+                React.createElement(Box, { sx:{ display:'flex', gap:2, mt:1, flexWrap:'wrap' } },
+                  React.createElement(Box, null, React.createElement(Typography, { variant:'body2', color:'text.secondary' }, 'CPU:'), React.createElement(Typography, null, local.server.cpu_percent ?? '—')),
+                  React.createElement(Box, null, React.createElement(Typography, { variant:'body2', color:'text.secondary' }, 'RAM:'), React.createElement(Typography, null, (local.server.ram_used_gb != null ? `${local.server.ram_used_gb} / ${local.server.ram_total_gb} GB` : '—'))),
+                  React.createElement(Box, null, React.createElement(Typography, { variant:'body2', color:'text.secondary' }, 'Uptime (days):'), React.createElement(Typography, null, local.server.uptime_days ?? '—')),
+                  React.createElement(Box, null, React.createElement(Typography, { variant:'body2', color:'text.secondary' }, 'RX Mbps:'), React.createElement(Typography, null, local.server.rx_mbps ?? '—')),
+                  React.createElement(Box, null, React.createElement(Typography, { variant:'body2', color:'text.secondary' }, 'TX Mbps:'), React.createElement(Typography, null, local.server.tx_mbps ?? '—'))
+                )
+              ),
+              !loading && !error && local && !local.server && React.createElement(Typography, { color:'text.secondary' }, 'Данные локального сервера недоступны')
             )
           );
         }
