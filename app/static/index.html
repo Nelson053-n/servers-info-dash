@@ -323,6 +323,7 @@ const I = {
     title: "Server Info Dashboard",
     loading: "Загрузка...",
     collecting: "Сбор метрик... Первый запуск может занять несколько секунд",
+    collecting_long: "Сбор метрик занимает больше времени, чем обычно...",
     updated: "Обновлено",
     interval: "Интервал",
     add_server: "+ Добавить сервер",
@@ -414,6 +415,7 @@ const I = {
     title: "Server Info Dashboard",
     loading: "Loading...",
     collecting: "Collecting metrics... First run may take a few seconds",
+    collecting_long: "Collecting metrics is taking longer than usual...",
     updated: "Updated",
     interval: "Interval",
     add_server: "+ Add server",
@@ -506,6 +508,20 @@ const I = {
 let lang = localStorage.getItem("lang") || "ru";
 
 function t(key) { return I[lang][key] || key; }
+
+let _sshPersistent = false;
+function _syncSshBtn(val) {
+  _sshPersistent = !!val;
+  const btn = document.getElementById("sshModeBtn");
+  if (!btn) return;
+  if (_sshPersistent) {
+    btn.textContent = t("ssh_persistent");
+    btn.title = t("ssh_tip_persistent");
+  } else {
+    btn.textContent = t("ssh_normal");
+    btn.title = t("ssh_tip_normal");
+  }
+}
 
 function applyLang() {
   document.querySelectorAll("[data-i]").forEach(el => {
@@ -1073,19 +1089,22 @@ confYes.addEventListener("click", async () => {
 });
 
 /* =========  refresh  ========= */
+let _notReadyCount = 0;
 async function refresh() {
   try {
     const r = await fetch("/api/metrics", {cache: "no-store"});
     if (!r.ok) throw new Error("HTTP " + r.status);
     const data = await r.json();
     if (!data.ready) {
-      meta.textContent = t("collecting");
+      _notReadyCount++;
+      meta.textContent = _notReadyCount > 5 ? t("collecting_long") : t("collecting");
       if (data.servers && data.servers.length) {
         serverData = data.servers;
         renderTable();
       }
       return;
     }
+    _notReadyCount = 0;
     serverData = data.servers;
     lastMeta = data;
     renderTable();
@@ -1126,19 +1145,8 @@ intervalSel.addEventListener("change", async () => {
 });
 
 /* =========  SSH mode toggle  ========= */
-let _sshPersistent = false;
 const sshBtn = $("sshModeBtn");
 
-function _syncSshBtn(val) {
-  _sshPersistent = !!val;
-  if (_sshPersistent) {
-    sshBtn.textContent = t("ssh_persistent");
-    sshBtn.title = t("ssh_tip_persistent");
-  } else {
-    sshBtn.textContent = t("ssh_normal");
-    sshBtn.title = t("ssh_tip_normal");
-  }
-}
 _syncSshBtn(false);
 
 sshBtn.addEventListener("click", async () => {
