@@ -7,6 +7,7 @@ import io
 import ipaddress
 import json
 import logging
+import os
 import platform
 import re
 import secrets
@@ -638,7 +639,12 @@ def load_config() -> AppConfig:
         )
 
     raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
-    return AppConfig.model_validate(raw)
+    config = AppConfig.model_validate(raw)
+    # Allow overriding bot token via environment variable
+    env_token = os.environ.get("BOT_TOKEN")
+    if env_token:
+        config.bot.token = env_token
+    return config
 
 
 def save_config(updated_cfg: AppConfig) -> None:
@@ -961,6 +967,44 @@ app.mount(
     name="static",
 )
 
+
+# ---- rate limiter ----
+class _RateLimiter:
+    """Simple in-memory per-IP rate limiter (sliding window)."""
+
+    def __init__(
+        self,
+        max_requests: int = 30,
+        window_sec: int = 60,
+    ) -> None:
+        self._max = max_requests
+        self._window = window_sec
+        self._hits: dict[str, list[float]] = {}
+
+    def is_limited(self, ip: str) -> bool:
+        now = dt.datetime.now(dt.timezone.utc).timestamp()
+        cutoff = now - self._window
+        hits = self._hits.get(ip, [])
+        hits = [t for t in hits if t > cutoff]
+        if len(hits) >= self._max:
+            self._hits[ip] = hits
+            return True
+        hits.append(now)
+        self._hits[ip] = hits
+        return False
+
+
+_api_limiter = _RateLimiter(max_requests=30, window_sec=60)
+
+_RATE_LIMITED_PREFIXES = (
+    "/api/servers",
+    "/api/bot",
+    "/api/interval",
+    "/api/ssh_mode",
+    "/api/auth/settings",
+)
+
+
 # ---- auth system ----
 _AUTH_PATH = Path("config/auth.yaml")
 _AUTH_LOCK = Lock()
@@ -1115,7 +1159,7 @@ def _geo_lookup(ip: str) -> str:
     """Best-effort country lookup via ip-api."""
     try:
         url = (
-            f"http://ip-api.com/json/{ip}"
+            f"https://ip-api.com/json/{ip}"
             "?fields=country"
         )
         req = urllib.request.Request(
@@ -1201,6 +1245,15 @@ async def auth_middleware(
         return JSONResponse(
             {"detail": "CSRF check failed"}, status_code=403,
         )
+    # rate limit state-changing API endpoints
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        if any(path.startswith(p) for p in _RATE_LIMITED_PREFIXES):
+            ip_rl = _client_ip(request)
+            if _api_limiter.is_limited(ip_rl):
+                return JSONResponse(
+                    {"detail": "Too many requests"},
+                    status_code=429,
+                )
     # if no password set, everything open
     if not _auth.password_hash:
         return await call_next(request)
@@ -1977,8 +2030,19 @@ async def update_auth_settings(
         nets: list[str] = []
         for n in payload.allowed_networks:
             n = n.strip()
-            if n:
-                nets.append(n)
+            if not n:
+                continue
+            try:
+                ipaddress.ip_network(n, strict=False)
+            except ValueError:
+                try:
+                    ipaddress.ip_address(n)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid network or IP: {n}",
+                    )
+            nets.append(n)
         _auth.allowed_networks = nets
         _save_auth(_auth)
     return {
