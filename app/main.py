@@ -1160,10 +1160,10 @@ def _check_csrf(request: Request) -> bool:
     if not origin:
         # no Origin header — allow (non-browser client)
         return True
-    host = request.headers.get("host", "")
+    host = request.headers.get("host", "").split(":")[0]
     # extract host from origin (scheme://host[:port])
     try:
-        origin_host = origin.split("://", 1)[1]
+        origin_host = origin.split("://", 1)[1].split(":")[0]
     except IndexError:
         return False
     return origin_host == host
