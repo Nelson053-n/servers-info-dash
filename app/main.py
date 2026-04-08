@@ -107,6 +107,8 @@ class PreviousSample:
 
 
 class MetricsCollector:
+    _PING_INTERVAL: float = 30.0  # seconds between ping measurements
+
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self._previous: dict[str, PreviousSample] = {}
@@ -115,6 +117,8 @@ class MetricsCollector:
         self._error_threshold: int = 5
         self._pool: dict[str, asyncssh.SSHClientConnection] = {}
         self._pool_lock = asyncio.Lock()
+        self._ping_cache: dict[str, float] = {}
+        self._ping_last_time: dict[str, float] = {}
 
     async def collect_all(self) -> dict[str, Any]:
         tasks = [self.collect_server(server) for server in self.cfg.servers]
@@ -128,10 +132,28 @@ class MetricsCollector:
             "servers": servers,
         }
 
-    async def collect_server(self, server: ServerConfig) -> dict[str, Any]:
+    async def _get_ping(self, server: ServerConfig) -> float | None:
+        """Return cached ping or measure a new one (at most once per _PING_INTERVAL)."""
+        now = asyncio.get_running_loop().time()
+        last = self._ping_last_time.get(server.name, 0.0)
+        if now - last < self._PING_INTERVAL and server.name in self._ping_cache:
+            return self._ping_cache[server.name]
+
         ping_ms = await self._ping(server.host)
         if ping_ms is None:
             ping_ms = await self._tcp_ping(server.host, server.port)
+
+        if ping_ms is not None:
+            self._ping_cache[server.name] = ping_ms
+            self._ping_last_time[server.name] = now
+        else:
+            # keep previous value if available
+            ping_ms = self._ping_cache.get(server.name)
+
+        return ping_ms
+
+    async def collect_server(self, server: ServerConfig) -> dict[str, Any]:
+        ping_ms = await self._get_ping(server)
 
         base = {
             "name": server.name,
