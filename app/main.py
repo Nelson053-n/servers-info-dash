@@ -1422,6 +1422,36 @@ def _rotate_logs() -> None:
                 pass
 
 
+def _read_traffic_rows(
+    file_path: Path,
+) -> list[tuple[str, str, str]]:
+    """Read (name, rx, tx) triples from one CSV log file.
+
+    Raises csv.Error on corrupted files (e.g. NUL bytes), letting
+    callers skip that file instead of failing the whole calculation.
+    """
+    rows: list[tuple[str, str, str]] = []
+    with file_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.reader(fh)
+        _ = next(reader, None)  # header
+        for values in reader:
+            # Handle mixed schemas in legacy files:
+            # old: 12 columns, new: 15 columns.
+            if len(values) >= 15:
+                rows.append((
+                    values[1] if len(values) > 1 else "",
+                    values[11] if len(values) > 11 else "",
+                    values[12] if len(values) > 12 else "",
+                ))
+            elif len(values) >= 12:
+                rows.append((
+                    values[1] if len(values) > 1 else "",
+                    values[8] if len(values) > 8 else "",
+                    values[9] if len(values) > 9 else "",
+                ))
+    return rows
+
+
 def _calculate_traffic_30d_gb() -> dict[str, float]:
     """Calculate per-server RX+TX traffic for the last 30 days."""
     cutoff = dt.date.today() - dt.timedelta(days=30)
@@ -1441,46 +1471,38 @@ def _calculate_traffic_30d_gb() -> dict[str, float]:
         if file_path.stat().st_size <= 0:
             continue
 
-        with file_path.open(encoding="utf-8", newline="") as fh:
-            reader = csv.reader(fh)
-            _ = next(reader, None)  # header
-            for values in reader:
-                # Handle mixed schemas in legacy files:
-                # old: 12 columns, new: 15 columns.
-                if len(values) >= 15:
-                    row_name = values[1] if len(values) > 1 else ""
-                    rx_raw = values[11] if len(values) > 11 else ""
-                    tx_raw = values[12] if len(values) > 12 else ""
-                elif len(values) >= 12:
-                    row_name = values[1] if len(values) > 1 else ""
-                    rx_raw = values[8] if len(values) > 8 else ""
-                    tx_raw = values[9] if len(values) > 9 else ""
-                else:
-                    continue
+        try:
+            rows = _read_traffic_rows(file_path)
+        except (OSError, csv.Error, UnicodeDecodeError):
+            logger.exception(
+                "skipping unreadable traffic log %s", file_path.name,
+            )
+            continue
 
-                row_key = (
-                    _safe_filename(row_name)
-                    if row_name
-                    else safe_name
-                )
-                try:
-                    rx = float(rx_raw or 0.0)
-                except (TypeError, ValueError):
-                    rx = 0.0
-                try:
-                    tx = float(tx_raw or 0.0)
-                except (TypeError, ValueError):
-                    tx = 0.0
-                if rx <= 0 and tx <= 0:
-                    continue
-                row_total = totals_raw.get(row_key, 0.0)
-                period_megabits = (
-                    (rx + tx) * cfg.refresh_interval_sec
-                )
-                period_megabytes = period_megabits / 8.0
-                period_gigabytes = period_megabytes / 1000.0
-                row_total += period_gigabytes
-                totals_raw[row_key] = row_total
+        for row_name, rx_raw, tx_raw in rows:
+            row_key = (
+                _safe_filename(row_name)
+                if row_name
+                else safe_name
+            )
+            try:
+                rx = float(rx_raw or 0.0)
+            except (TypeError, ValueError):
+                rx = 0.0
+            try:
+                tx = float(tx_raw or 0.0)
+            except (TypeError, ValueError):
+                tx = 0.0
+            if rx <= 0 and tx <= 0:
+                continue
+            row_total = totals_raw.get(row_key, 0.0)
+            period_megabits = (
+                (rx + tx) * cfg.refresh_interval_sec
+            )
+            period_megabytes = period_megabits / 8.0
+            period_gigabytes = period_megabytes / 1000.0
+            row_total += period_gigabytes
+            totals_raw[row_key] = row_total
 
     return {
         key: round(value, 3)
@@ -1507,44 +1529,38 @@ def _calculate_traffic_1d_gb() -> dict[str, float]:
         if file_path.stat().st_size <= 0:
             continue
 
-        with file_path.open(encoding="utf-8", newline="") as fh:
-            reader = csv.reader(fh)
-            _ = next(reader, None)  # header
-            for values in reader:
-                if len(values) >= 15:
-                    row_name = values[1] if len(values) > 1 else ""
-                    rx_raw = values[11] if len(values) > 11 else ""
-                    tx_raw = values[12] if len(values) > 12 else ""
-                elif len(values) >= 12:
-                    row_name = values[1] if len(values) > 1 else ""
-                    rx_raw = values[8] if len(values) > 8 else ""
-                    tx_raw = values[9] if len(values) > 9 else ""
-                else:
-                    continue
+        try:
+            rows = _read_traffic_rows(file_path)
+        except (OSError, csv.Error, UnicodeDecodeError):
+            logger.exception(
+                "skipping unreadable traffic log %s", file_path.name,
+            )
+            continue
 
-                row_key = (
-                    _safe_filename(row_name)
-                    if row_name
-                    else safe_name
-                )
-                try:
-                    rx = float(rx_raw or 0.0)
-                except (TypeError, ValueError):
-                    rx = 0.0
-                try:
-                    tx = float(tx_raw or 0.0)
-                except (TypeError, ValueError):
-                    tx = 0.0
-                if rx <= 0 and tx <= 0:
-                    continue
-                row_total = totals_raw.get(row_key, 0.0)
-                period_megabits = (
-                    (rx + tx) * cfg.refresh_interval_sec
-                )
-                period_megabytes = period_megabits / 8.0
-                period_gigabytes = period_megabytes / 1000.0
-                row_total += period_gigabytes
-                totals_raw[row_key] = row_total
+        for row_name, rx_raw, tx_raw in rows:
+            row_key = (
+                _safe_filename(row_name)
+                if row_name
+                else safe_name
+            )
+            try:
+                rx = float(rx_raw or 0.0)
+            except (TypeError, ValueError):
+                rx = 0.0
+            try:
+                tx = float(tx_raw or 0.0)
+            except (TypeError, ValueError):
+                tx = 0.0
+            if rx <= 0 and tx <= 0:
+                continue
+            row_total = totals_raw.get(row_key, 0.0)
+            period_megabits = (
+                (rx + tx) * cfg.refresh_interval_sec
+            )
+            period_megabytes = period_megabits / 8.0
+            period_gigabytes = period_megabytes / 1000.0
+            row_total += period_gigabytes
+            totals_raw[row_key] = row_total
 
     return {
         key: round(value, 3)
@@ -1848,7 +1864,7 @@ async def _background_collector() -> None:
                     None, _rotate_logs,
                 )
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("background collector cycle failed")
         await asyncio.sleep(cfg.refresh_interval_sec)
 
 
