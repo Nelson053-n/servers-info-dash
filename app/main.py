@@ -1201,6 +1201,7 @@ _auth = _load_auth()
 _PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/status",
+    "/api/health",
 }
 
 
@@ -1332,6 +1333,8 @@ _LOGS_DIR.mkdir(exist_ok=True)
 _LOG_RETENTION_DAYS = 30
 _TRAFFIC_30D_CACHE_TTL_SEC = 300
 _TRAFFIC_1D_CACHE_TTL_SEC = 60
+# how many refresh intervals may pass before /api/health reports 503
+_HEALTH_MAX_AGE_CYCLES = 3
 
 _CSV_COLUMNS = [
     "timestamp", "name", "host", "status",
@@ -1845,14 +1848,20 @@ async def _background_collector() -> None:
     while True:
         try:
             data = await collector.collect_all()
-            _attach_traffic_30d(data["servers"])
-            _attach_traffic_1d(data["servers"])
+            # traffic maps re-read every CSV log file, which takes
+            # seconds once logs grow — keep it off the event loop
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, _attach_traffic_30d, data["servers"],
+            )
+            await loop.run_in_executor(
+                None, _attach_traffic_1d, data["servers"],
+            )
             data["ready"] = True
             async with _metrics_lock:
                 _cached_metrics = data
             await _check_and_notify(data["servers"])
             # write metrics to CSV log files
-            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None, _log_server_metrics, data["servers"],
             )
@@ -2099,6 +2108,44 @@ async def index() -> FileResponse:
 async def metrics() -> dict[str, Any]:
     async with _metrics_lock:
         return _cached_metrics
+
+
+@app.get("/api/health")
+async def health(response: Response) -> dict[str, Any]:
+    """Report collector liveness, not just that HTTP is up.
+
+    Returns 503 while the collector has never completed a cycle or
+    its last result is older than _HEALTH_MAX_AGE_CYCLES intervals,
+    so deploys and external probes catch a dead collector.
+    """
+    async with _metrics_lock:
+        ready = bool(_cached_metrics.get("ready"))
+        generated_at = str(_cached_metrics.get("generated_at", ""))
+
+    age_sec: float | None = None
+    try:
+        ts = dt.datetime.fromisoformat(generated_at)
+    except ValueError:
+        ts = None
+    if ts is not None:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt.timezone.utc)
+        now = dt.datetime.now(dt.timezone.utc)
+        age_sec = round((now - ts).total_seconds(), 1)
+
+    max_age = cfg.refresh_interval_sec * _HEALTH_MAX_AGE_CYCLES
+    stale = age_sec is None or age_sec > max_age
+    healthy = ready and not stale
+    if not healthy:
+        response.status_code = 503
+
+    return {
+        "status": "ok" if healthy else "degraded",
+        "ready": ready,
+        "generated_at": generated_at,
+        "age_sec": age_sec,
+        "max_age_sec": max_age,
+    }
 
 
 @app.get("/api/logs/{server_name}")

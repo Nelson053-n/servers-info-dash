@@ -69,9 +69,12 @@ jobs:
             git reset --hard origin/main
             /opt/servers-info-dash/.venv/bin/pip install -r requirements.txt
             systemctl restart servers-info-dash.service
-            for i in $(seq 1 30); do
+            # /api/health returns 503 until the collector completes a
+            # cycle, so a dead collector fails the deploy instead of
+            # passing on a served HTML page
+            for i in $(seq 1 90); do
               if systemctl is-active --quiet servers-info-dash.service; then
-                if curl -fsS http://127.0.0.1:8000/ > /dev/null; then
+                if curl -fsS http://127.0.0.1:8000/api/health > /dev/null; then
                   exit 0
                 fi
               fi
