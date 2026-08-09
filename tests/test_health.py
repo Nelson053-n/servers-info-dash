@@ -1,7 +1,7 @@
 from pathlib import Path
 
 SOURCE = Path("app/main.py").read_text(encoding="utf-8")
-WORKFLOW = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+DEPLOY_SCRIPT = Path("deploy/dash-autodeploy.sh").read_text(encoding="utf-8")
 
 
 def test_health_endpoint_exists_and_is_public():
@@ -21,8 +21,14 @@ def test_health_reports_503_when_stale():
 
 def test_deploy_healthcheck_probes_collector():
     """Deploy must verify the collector, not just served HTML."""
-    assert "/api/health" in WORKFLOW
-    assert "curl -fsS http://127.0.0.1:8000/ >" not in WORKFLOW
+    assert "/api/health" in DEPLOY_SCRIPT
+    assert "curl -fsS \"$HEALTH_URL\"" in DEPLOY_SCRIPT
+
+
+def test_deploy_rolls_back_on_failed_health():
+    """A commit that never goes healthy must not stay deployed."""
+    assert "rolling back" in DEPLOY_SCRIPT
+    assert 'git reset --hard "$local_sha"' in DEPLOY_SCRIPT
 
 
 def test_traffic_attach_runs_off_event_loop():
