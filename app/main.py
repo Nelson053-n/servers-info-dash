@@ -687,6 +687,11 @@ def _validate_unix_username(username: str, field_name: str) -> None:
         )
 
 
+# Keys the app generates itself live here, and only these may be
+# deleted when a server is removed — client_key is caller-controlled.
+_MANAGED_KEY_DIR = Path("~/.ssh")
+
+
 def _is_key_fingerprint(value: str) -> bool:
     return value.startswith("SHA256:") or value.startswith("MD5:")
 
@@ -797,10 +802,20 @@ def _resolve_public_key_by_fingerprint(
     )
 
 
+def _is_managed_key(key_path: Path) -> bool:
+    """True if the app generated this key and may delete it."""
+    managed_dir = _MANAGED_KEY_DIR.expanduser()
+    try:
+        resolved = key_path.expanduser().resolve()
+        return resolved.parent == managed_dir.resolve()
+    except OSError:
+        return False
+
+
 def _generate_ssh_key_pair(server_name: str) -> tuple[str, str]:
     """Generate ed25519 key pair. Returns (private_path, public_key_text)."""
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", server_name)
-    ssh_dir = Path("~/.ssh").expanduser()
+    ssh_dir = _MANAGED_KEY_DIR.expanduser()
     ssh_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     private_path = ssh_dir / f"id_ed25519_{safe_name}"
@@ -2333,7 +2348,13 @@ def _cleanup_server_key(
     if _is_key_fingerprint(client_key):
         return
     key_path = Path(client_key).expanduser()
-    pub_path = key_path.with_suffix(".pub")
+    # A caller-supplied client_key may point anywhere; deleting it would
+    # remove arbitrary files as the app user (root in production).
+    if not _is_managed_key(key_path):
+        return
+    # ".pub" must be appended, not substituted: with_suffix turns
+    # "config.yaml" into "config.pub" — a file the caller never named.
+    pub_path = Path(str(key_path) + ".pub")
 
     still_used = any(
         s.client_key and str(Path(s.client_key).expanduser()) == str(key_path)
