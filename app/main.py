@@ -1052,6 +1052,8 @@ _MAX_HISTORY = 20
 _SESSION_MAX_AGE_DAYS = 30
 _PBKDF2_ITERATIONS = 600_000
 _MIN_PASSWORD_LENGTH = 8
+# One-time token gating first-run setup; None once a password exists.
+_setup_token: str | None = None
 
 
 @dataclass
@@ -1083,8 +1085,17 @@ def _load_auth() -> _AuthState:
     raw = yaml.safe_load(
         _AUTH_PATH.read_text(encoding="utf-8"),
     )
-    if not raw or not isinstance(raw, dict):
+    # An absent or empty file is a first run. A file that exists with
+    # content but no password_hash is damage — a kill mid-write leaves
+    # valid YAML behind — and must not degrade into "no password set",
+    # which would unlock every endpoint.
+    if raw is None or raw == "":
         return _AuthState()
+    if not isinstance(raw, dict) or "password_hash" not in raw:
+        raise RuntimeError(
+            f"{_AUTH_PATH} is corrupted: no password_hash. Refusing to "
+            f"start unauthenticated. Restore it or delete it to start over."
+        )
     return _AuthState(
         password_hash=raw.get("password_hash", ""),
         allowed_networks=raw.get(
@@ -1117,6 +1128,29 @@ def _save_auth(state: _AuthState) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _ensure_setup_token() -> str | None:
+    """Mint a one-time token when no password is configured.
+
+    Without this an unconfigured dashboard served every endpoint to
+    anyone who could reach the port. The token is printed to the journal
+    at startup and is the only way to set the first password.
+    """
+    global _setup_token
+    if _auth.password_hash:
+        _setup_token = None
+        return None
+    if _setup_token is None:
+        _setup_token = secrets.token_urlsafe(32)
+    return _setup_token
+
+
+def _check_setup_token(provided: str | None) -> bool:
+    """Constant-time check of the first-run setup token."""
+    if not _setup_token or not provided:
+        return False
+    return secrets.compare_digest(provided, _setup_token)
 
 
 def _hash_password(pw: str) -> str:
@@ -1219,6 +1253,14 @@ _PUBLIC_PATHS = {
     "/api/health",
 }
 
+# Reachable before a password exists — just enough to complete setup.
+_SETUP_PATHS = {
+    "/",
+    "/api/auth/status",
+    "/api/auth/settings",
+    "/api/health",
+}
+
 
 def _session_expired(token: str) -> bool:
     """Check if session has exceeded max age."""
@@ -1292,9 +1334,23 @@ async def auth_middleware(
                     {"detail": "Too many requests"},
                     status_code=429,
                 )
-    # if no password set, everything open
+    # No password configured: serve only what first-run setup needs.
+    # Everything else stays shut, so an unconfigured dashboard is not a
+    # a way in for anyone who can reach the port.
     if not _auth.password_hash:
-        return await call_next(request)
+        if path in _SETUP_PATHS:
+            return await call_next(request)
+        return JSONResponse(
+            {
+                "detail": (
+                    "Dashboard is not configured. Set a password using "
+                    "the setup token from the service log "
+                    "(journalctl -u servers-info-dash)."
+                ),
+                "needs_setup": True,
+            },
+            status_code=403,
+        )
     # public auth endpoints
     if path in _PUBLIC_PATHS:
         return await call_next(request)
@@ -1894,6 +1950,13 @@ async def _background_collector() -> None:
 
 @app.on_event("startup")
 async def _start_background_tasks() -> None:
+    token = _ensure_setup_token()
+    if token:
+        logger.warning(
+            "No password configured. Open the dashboard and set one "
+            "using this setup token: %s",
+            token,
+        )
     asyncio.create_task(_background_collector())
 
 
@@ -1907,6 +1970,7 @@ class _SecuritySettingsRequest(BaseModel):
     current_password: str | None = None
     password: str | None = None
     allowed_networks: list[str] = []
+    setup_token: str | None = None  # first run only
 
 
 @app.get("/api/auth/status")
@@ -2086,9 +2150,20 @@ async def update_auth_settings(
                         status_code=403,
                         detail="Current password is incorrect",
                     )
+            # First run has no current password to prove, so the setup
+            # token from the service log takes its place.
+            elif not _check_setup_token(payload.setup_token):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Invalid setup token. Find it in the service log: "
+                        "journalctl -u servers-info-dash"
+                    ),
+                )
             _auth.password_hash = _hash_password(
                 payload.password,
             )
+            _ensure_setup_token()  # password now set -> token retired
         nets: list[str] = []
         for n in payload.allowed_networks:
             n = n.strip()
