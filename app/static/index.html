@@ -260,6 +260,7 @@ tr:last-child td{border-bottom:none}
   </form>
 
   <div class="sec-form hidden" id="secPanel">
+    <input id="secSetupToken" class="full hidden"/>
     <input id="secCurrentPassword" type="password"/>
     <input id="secPassword" type="password"/>
     <input id="secPasswordConfirm" type="password"/>
@@ -394,6 +395,8 @@ const I = {
     sec_pw_mismatch: "Пароли не совпадают",
     sec_pw_set: "Пароль задан",
     sec_pw_not_set: "Пароль не задан",
+    sec_setup_hint: "Пароль не задан. Введите токен установки из журнала службы: journalctl -u servers-info-dash",
+    ph_sec_setup_token: "Токен установки из журнала службы",
     ph_sec_cur_pw: "Текущий пароль",
     ph_sec_pw: "Новый пароль (мин. 8 символов, пусто = не менять)",
     ph_sec_pw2: "Повторите пароль",
@@ -486,6 +489,8 @@ const I = {
     sec_pw_mismatch: "Passwords don't match",
     sec_pw_set: "Password is set",
     sec_pw_not_set: "No password set",
+    sec_setup_hint: "No password set. Enter the setup token from the service log: journalctl -u servers-info-dash",
+    ph_sec_setup_token: "Setup token from the service log",
     ph_sec_cur_pw: "Current password",
     ph_sec_pw: "New password (min 8 chars, empty = keep)",
     ph_sec_pw2: "Confirm password",
@@ -549,6 +554,7 @@ function applyLang() {
     secPassword: "ph_sec_pw",
     secPasswordConfirm: "ph_sec_pw2",
     secNetworks: "ph_sec_nets",
+    secSetupToken: "ph_sec_setup_token",
   };
   for (const [id, key] of Object.entries(ph)) {
     const el = document.getElementById(id);
@@ -1249,8 +1255,13 @@ toggleSec.addEventListener("click", async () => {
       $("secCurrentPassword").value = "";
       $("secPassword").value = "";
       $("secPasswordConfirm").value = "";
+      $("secSetupToken").value = "";
       $("secNetworks").value = (d.allowed_networks || []).join(", ");
-      secMsg.textContent = d.has_password ? t("sec_pw_set") : t("sec_pw_not_set");
+      /* first run: the setup token from the service log stands in for
+         the current password, which does not exist yet */
+      $("secSetupToken").classList.toggle("hidden", !!d.has_password);
+      $("secCurrentPassword").classList.toggle("hidden", !d.has_password);
+      secMsg.textContent = d.has_password ? t("sec_pw_set") : t("sec_setup_hint");
       secMsg.className = d.has_password ? "msg ok" : "msg";
       // render history
       const hist = d.history || [];
@@ -1291,6 +1302,7 @@ $("secSave").addEventListener("click", async () => {
     current_password: curPw || null,
     password: pw || null,
     allowed_networks: nets,
+    setup_token: $("secSetupToken").value.trim() || null,
   };
   secMsg.textContent = t("saving"); secMsg.className = "msg";
   try {
@@ -1306,6 +1318,7 @@ $("secSave").addEventListener("click", async () => {
     $("secCurrentPassword").value = "";
     $("secPassword").value = "";
     $("secPasswordConfirm").value = "";
+    $("secSetupToken").value = "";
     checkAuth();
   } catch(e) {
     secMsg.textContent = t("error_prefix") + ": " + e.message;
