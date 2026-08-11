@@ -1271,8 +1271,12 @@ def _save_auth(state: _AuthState) -> None:
     # the file must never be world-readable. Set the mode before writing
     # rather than after, or the contents sit at the umask default for
     # the duration of the write.
+    # Write to a sibling and rename: a kill or a full disk partway
+    # through would otherwise leave valid-but-truncated YAML, which
+    # _load_auth reads as "no password set".
+    tmp_path = _AUTH_PATH.with_name(f".{_AUTH_PATH.name}.tmp")
     fd = os.open(
-        _AUTH_PATH,
+        tmp_path,
         os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
         0o600,
     )
@@ -1281,10 +1285,15 @@ def _save_auth(state: _AuthState) -> None:
             yaml.safe_dump(
                 data, fh, sort_keys=False, allow_unicode=True,
             )
-    finally:
-        # O_CREAT only applies the mode to a new file; an existing one
-        # deployed at 0644 keeps its old permissions without this.
-        _AUTH_PATH.chmod(0o600)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, _AUTH_PATH)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    # O_CREAT only applies the mode to a new file; one deployed at 0644
+    # keeps its old permissions without this.
+    _AUTH_PATH.chmod(0o600)
 
 
 def _prune_login_state() -> None:
@@ -1429,16 +1438,27 @@ def _ip_allowed(
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
+    # A dual-stack socket reports IPv4 clients as ::ffff:a.b.c.d, which
+    # never matches an IPv4 network — the operator's own whitelist would
+    # lock them out.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
     for net_str in networks:
         try:
             net = ipaddress.ip_network(
-                net_str, strict=False,
+                net_str.strip(), strict=False,
             )
-            if addr in net:
-                return True
         except ValueError:
-            if ip == net_str:
-                return True
+            # No string-equality fallback: "192.168.1.5 " and
+            # "::ffff:192.168.1.5" are the same address written
+            # differently, and comparing text gets both wrong.
+            logger.warning(
+                "ignoring malformed whitelist entry %r", net_str,
+            )
+            continue
+        if addr in net:
+            return True
     return False
 
 
@@ -2377,8 +2397,14 @@ async def auth_login(
     # success
     token = secrets.token_urlsafe(32)
     ua = request.headers.get("user-agent", "")
-    country = await asyncio.get_running_loop(
-    ).run_in_executor(None, _geo_lookup, ip)
+    # Country is decoration for the login history; a third-party lookup
+    # being down must not stop anyone signing in.
+    try:
+        country = await asyncio.get_running_loop(
+        ).run_in_executor(None, _geo_lookup, ip)
+    except Exception:  # noqa: BLE001
+        logger.warning("geo lookup failed for %s", ip, exc_info=True)
+        country = ""
     with _AUTH_LOCK:
         _auth.sessions[token] = ip
         _auth.session_created[token] = (

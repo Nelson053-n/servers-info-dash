@@ -47,9 +47,11 @@ def test_file_is_never_world_readable_mid_write(
     real_dump = main_module.yaml.safe_dump
 
     def spy(data, stream=None, **kwargs):
-        # Called with the file open and the contents being written.
-        if target.exists():
-            seen.append(_mode(target))
+        # Called with the contents being written. The write goes to a
+        # temp sibling that is renamed into place, so check whichever
+        # files exist at this moment — none may be world-readable.
+        for path in tmp_path.iterdir():
+            seen.append(_mode(path))
         return real_dump(data, stream, **kwargs)
 
     monkeypatch.setattr(main_module.yaml, "safe_dump", spy)
