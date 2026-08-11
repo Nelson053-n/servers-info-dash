@@ -1661,7 +1661,9 @@ def _log_server_metrics(
     servers: list[dict[str, Any]],
 ) -> None:
     """Append one CSV row per server to daily log files."""
-    today = dt.date.today().isoformat()
+    # UTC, matching the timestamps written into the rows: a local date
+    # would put rows from one UTC day into a file named for another.
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     for srv in servers:
         safe = _safe_filename(srv.get("name", "unknown"))
         log_path = _LOGS_DIR / f"{safe}_{today}.csv"
@@ -1701,7 +1703,7 @@ def _log_server_metrics(
 
 def _rotate_logs() -> None:
     """Delete log files older than _LOG_RETENTION_DAYS."""
-    cutoff = dt.date.today() - dt.timedelta(
+    cutoff = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(
         days=_LOG_RETENTION_DAYS,
     )
     for f in _LOGS_DIR.glob("*.csv"):
@@ -1783,7 +1785,7 @@ def _sample_period_sec(
 
 def _calculate_traffic_30d_gb() -> dict[str, float]:
     """Calculate per-server RX+TX traffic for the last 30 days."""
-    cutoff = dt.date.today() - dt.timedelta(days=30)
+    cutoff = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=30)
     totals_raw: dict[str, float] = {}
 
     for file_path in _LOGS_DIR.glob("*.csv"):
@@ -1848,8 +1850,13 @@ def _calculate_traffic_30d_gb() -> dict[str, float]:
 
 
 def _calculate_traffic_1d_gb() -> dict[str, float]:
-    """Calculate per-server RX+TX traffic for the last 1 day."""
-    cutoff = dt.date.today() - dt.timedelta(days=1)
+    """Calculate per-server RX+TX traffic for the last 24 hours."""
+    # The filename only narrows which files to open; the window itself
+    # is measured against the row timestamps, or "one day" would mean
+    # today-plus-yesterday — up to 48 hours, halving at each midnight.
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    window_start = now - dt.timedelta(days=1)
+    cutoff = window_start.date()
     totals_raw: dict[str, float] = {}
 
     for file_path in _LOGS_DIR.glob("*.csv"):
@@ -1887,6 +1894,10 @@ def _calculate_traffic_1d_gb() -> dict[str, float]:
                 row_ts, last_seen.get(row_key),
             )
             last_seen[row_key] = parsed
+            if parsed is not None and parsed < window_start:
+                # Outside the 24h window; still recorded above so the
+                # first in-window sample measures its gap correctly.
+                continue
             try:
                 rx = float(rx_raw or 0.0)
             except (TypeError, ValueError):
