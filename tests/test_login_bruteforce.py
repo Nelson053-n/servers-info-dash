@@ -33,22 +33,38 @@ def client(main_module, monkeypatch):
         yield c
 
 
-def test_login_is_rate_limited(client):
-    """Sustained guessing from one IP must hit a limiter, not just a counter."""
+@pytest.fixture
+def limiter_only(main_module, monkeypatch):
+    """Disable the failure counter so only the limiter can answer 429.
+
+    Without this the pre-existing 5-attempt block satisfies these
+    assertions and they pass even with the limiter removed entirely.
+    """
+    monkeypatch.setattr(main_module, "_MAX_LOGIN_ATTEMPTS", 10_000)
+    monkeypatch.setattr(main_module, "_record_login_failure", lambda ip: 9_999)
+
+
+def test_login_is_rate_limited(client, main_module, limiter_only):
+    """Sustained guessing must hit the limiter, not just the counter."""
+    budget = main_module._LOGIN_MAX_PER_WINDOW
     codes = [
         client.post("/api/auth/login", json={"password": "wrong"}).status_code
-        for _ in range(40)
+        for _ in range(budget + 5)
     ]
 
     assert 429 in codes, "no rate limit on /api/auth/login"
-    # Once limited, it must stay limited rather than letting every
-    # request through after the per-IP counter resets.
-    assert codes[-1] == 429, f"limit not sustained: tail={codes[-5:]}"
+    # The limiter alone must draw the line, at its own budget.
+    assert codes.index(429) == budget, (
+        f"429 first seen at {codes.index(429)}, expected {budget}"
+    )
+    assert codes[-1] == 429, f"limit not sustained: tail={codes[-3:]}"
 
 
-def test_rate_limit_survives_correct_password(client):
+def test_rate_limit_survives_correct_password(
+    client, main_module, limiter_only,
+):
     """A limited client must not slip through by guessing right at the end."""
-    for _ in range(40):
+    for _ in range(main_module._LOGIN_MAX_PER_WINDOW + 2):
         client.post("/api/auth/login", json={"password": "wrong"})
 
     r = client.post("/api/auth/login", json={"password": PASSWORD})

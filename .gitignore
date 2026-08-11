@@ -12,6 +12,13 @@ __pycache__/
 # Sensitive configs (contain tokens, passwords, IPs)
 config/servers.yaml
 config/auth.yaml
+config/key-info.yaml
+config/.servers.yaml.pytest
+
+# Private keys must never be committed
+*.pem
+id_ed25519*
+id_rsa*
 
 # Runtime logs (contain server IPs and metrics)
 logs/

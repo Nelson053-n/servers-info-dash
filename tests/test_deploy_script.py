@@ -18,17 +18,34 @@ _RUNUSER = """#!/bin/bash
 shift 2; shift            # drop -u USER --
 echo "runuser: $*" >> "$CALL_LOG"
 case "$*" in
-  *"git rev-parse"*)   echo "$LOCAL_SHA"; exit 0 ;;
+  *"--show-toplevel"*) echo "${REPO_ROOT:-$APP_DIR}"; exit "${TOPLEVEL_FAIL:-0}" ;;
+  *"git rev-parse"*)   echo "$LOCAL_SHA"; exit "${REVPARSE_FAIL:-0}" ;;
   *"git ls-remote"*)   printf '%s\\trefs/heads/main\\n' "$REMOTE_SHA"; exit 0 ;;
   *"git fetch"*)       exit "${FETCH_FAIL:-0}" ;;
-  *"git reset"*)       echo "reset to $3" ; exit "${RESET_FAIL:-0}" ;;
+  *"git reset"*)
+      # ROLLBACK_RESET_FAIL fails only the reset back to LOCAL_SHA, so
+      # the rollback path can be tested without aborting the forward one.
+      if [ -n "${ROLLBACK_RESET_FAIL:-}" ] && [[ "$*" == *"$LOCAL_SHA"* ]]; then
+          echo "error: could not reset (index.lock exists)" >&2
+          exit 128
+      fi
+      echo "reset to $3" ; exit "${RESET_FAIL:-0}" ;;
   *pip*install*)
-      if [ -n "$PIP_FAIL_ONCE" ] && [ ! -f "$STATE_DIR/pip_failed" ]; then
-          touch "$STATE_DIR/pip_failed"
+      # PIP_FAIL_SECOND lets the forward install succeed and fails the
+      # one inside rollback, which is a different code path.
+      if [ -n "${PIP_FAIL_SECOND:-}" ]; then
+          if [ -f "$STATE_DIR/pip_ran" ]; then
+              echo "ERROR: could not install package" >&2
+              exit 1
+          fi
+          touch "$STATE_DIR/pip_ran"
+          exit 0
+      fi
+      if [ -n "${PIP_FAIL:-}" ] && [ "${PIP_FAIL}" != "0" ]; then
           echo "ERROR: could not install package" >&2
           exit 1
       fi
-      exit "${PIP_FAIL:-0}" ;;
+      exit 0 ;;
 esac
 exit 0
 """
@@ -81,6 +98,7 @@ def deploy(tmp_path):
             "HEALTH_TIMEOUT": "2",
             "CALL_LOG": str(call_log),
             "STATE_DIR": str(state_dir),
+            "LOCK_FILE": str(tmp_path / "deploy.lock"),
             "LOCAL_SHA": "1111111111111111111111111111111111111111",
             "REMOTE_SHA": "2222222222222222222222222222222222222222",
         }
@@ -117,6 +135,8 @@ def test_pip_failure_rolls_back_without_restarting_broken_venv(deploy):
 
     assert proc.returncode == 1, proc.stdout
     assert "pip install failed" in proc.stdout, "failure was swallowed"
+    # The reason must reach the journal, not just the fact of failure.
+    assert "could not install package" in proc.stdout, "pip output lost"
     assert "rolling back" in proc.stdout
     # The rollback reset must happen before any restart, so the service
     # never runs the new code against a half-installed venv.
@@ -134,11 +154,25 @@ def test_failed_health_triggers_rollback(deploy):
 
 
 def test_rollback_reports_when_pip_also_fails(deploy):
-    """If the rollback's own install breaks, say so instead of 'works'."""
-    proc, _ = deploy(HEALTH_FAIL=1, PIP_FAIL_ONCE="", PIP_FAIL=1)
+    """If the rollback's own install breaks, say so instead of 'works'.
+
+    The forward install must succeed here, or the rollback is entered
+    through the pip path and this asserts nothing new.
+    """
+    proc, _ = deploy(HEALTH_FAIL=1, PIP_FAIL_SECOND=1)
 
     assert proc.returncode == 1
     assert "pip install failed during rollback" in proc.stdout
+
+
+def test_failed_rollback_reset_does_not_claim_recovery(deploy):
+    """A rollback whose reset fails must not report a working dashboard."""
+    proc, _ = deploy(HEALTH_FAIL=1, ROLLBACK_RESET_FAIL=1)
+
+    assert proc.returncode == 1
+    assert "rollback reset failed" in proc.stdout, (
+        "failed rollback reset went unnoticed"
+    )
 
 
 def test_fetch_failure_is_reported(deploy):

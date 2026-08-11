@@ -16,13 +16,14 @@ log() { echo "$*"; }
 notify() {
     # Telegram alert on failures only; credentials stay in the app config
     local text="$1"
-    "$APP_DIR/.venv/bin/python" - "$text" <<'PY' 2>/dev/null || true
-import json, sys, urllib.parse, urllib.request
+    APP_DIR="$APP_DIR" "$APP_DIR/.venv/bin/python" - "$text" <<'PY' 2>/dev/null \
+        || log "notify failed (Telegram unreachable or config unreadable)"
+import os, sys, urllib.parse, urllib.request
 from pathlib import Path
 
 import yaml
 
-cfg = yaml.safe_load(Path("/opt/servers-info-dash/config/servers.yaml").read_text())
+cfg = yaml.safe_load(Path(os.environ["APP_DIR"], "config/servers.yaml").read_text())
 bot = (cfg or {}).get("bot") or {}
 token, chat_id = bot.get("token"), bot.get("chat_id")
 if not (bot.get("enabled") and token and chat_id):
@@ -40,9 +41,15 @@ PY
 }
 
 wait_healthy() {
-    for _ in $(seq 1 "$HEALTH_TIMEOUT"); do
+    # Deadline by the clock, not by iteration count: a socket that
+    # accepts but never answers (a wedged event loop — the failure this
+    # health check exists for) would otherwise block a single iteration
+    # indefinitely and blow systemd's TimeoutStartSec.
+    local deadline=$((SECONDS + HEALTH_TIMEOUT))
+    while [ "$SECONDS" -lt "$deadline" ]; do
         if systemctl is-active --quiet "$SERVICE" \
-            && curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+            && curl -fsS --connect-timeout 3 --max-time 5 \
+                "$HEALTH_URL" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -53,8 +60,19 @@ wait_healthy() {
 rollback() {
     # $1 — why the deploy is being undone, quoted into the alert.
     local reason="$1"
+    local pip_output
     log "rolling back to ${local_sha:0:8} ($reason)"
-    runuser -u "$APP_USER" -- git reset --hard "$local_sha" 2>&1
+    # An unchecked reset here would leave the tree on the bad commit
+    # while the alert below claims recovery.
+    if ! runuser -u "$APP_USER" -- git reset --hard "$local_sha" 2>&1; then
+        log "rollback reset failed — tree still on ${remote_sha:0:8}"
+        notify "🔥 <b>Откат не выполнен</b>
+Коммит <code>${remote_sha:0:8}</code> не применён: ${reason}.
+<code>git reset --hard ${local_sha:0:8}</code> завершился с ошибкой —
+дерево осталось на сломанном коммите. Нужно вмешательство.
+<code>journalctl -u ${SERVICE}</code>"
+        exit 1
+    fi
 
     local pip_ok=1
     if ! pip_output=$(runuser -u "$APP_USER" -- \
@@ -78,9 +96,48 @@ rollback() {
     exit 1
 }
 
-cd "$APP_DIR" || exit 1
+# systemd will not re-trigger a running oneshot, but a manual
+# `systemctl start` or a hand-run script during a slow deploy would
+# interleave two git resets in the same tree.
+exec 9>"${LOCK_FILE:-/run/dash-autodeploy.lock}"
+if ! flock -n 9; then
+    log "another deploy is in progress, skipping this run"
+    exit 0
+fi
 
-local_sha=$(runuser -u "$APP_USER" -- git rev-parse HEAD 2>/dev/null) || exit 1
+# TimeoutStartSec eventually sends SIGTERM, and it lands precisely when
+# a deploy is slow — i.e. mid-recovery. Say so instead of dying mute.
+trap 'log "interrupted by signal — deploy state may be inconsistent"
+notify "⚠️ <b>Деплой прерван</b>
+Скрипт остановлен сигналом (вероятно, TimeoutStartSec).
+Состояние могло остаться несогласованным.
+<code>journalctl -u ${SERVICE}</code>"
+exit 1' TERM INT
+
+if ! cd "$APP_DIR"; then
+    log "cannot enter $APP_DIR"
+    notify "⚠️ <b>Деплой не запустился</b>
+Каталог <code>${APP_DIR}</code> недоступен."
+    exit 1
+fi
+
+# git reset --hard runs as root below, so make sure this really is the
+# dashboard checkout before mutating anything.
+repo_root=$(runuser -u "$APP_USER" -- git rev-parse --show-toplevel 2>/dev/null)
+if [ "$repo_root" != "$APP_DIR" ]; then
+    log "$APP_DIR is not a git repository root (got '${repo_root}')"
+    notify "⚠️ <b>Деплой остановлен</b>
+<code>${APP_DIR}</code> не является корнем git-репозитория."
+    exit 1
+fi
+
+if ! local_sha=$(runuser -u "$APP_USER" -- git rev-parse HEAD 2>&1); then
+    log "git rev-parse failed: $local_sha"
+    notify "⚠️ <b>Деплой не запустился</b>
+<code>git rev-parse HEAD</code> завершился с ошибкой.
+Возможна проблема с правами или safe.directory."
+    exit 1
+fi
 remote_sha=$(runuser -u "$APP_USER" -- git ls-remote origin refs/heads/main 2>/dev/null \
     | cut -f1)
 

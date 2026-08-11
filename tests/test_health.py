@@ -22,7 +22,10 @@ def test_health_reports_503_when_stale():
 def test_deploy_healthcheck_probes_collector():
     """Deploy must verify the collector, not just served HTML."""
     assert "/api/health" in DEPLOY_SCRIPT
-    assert "curl -fsS \"$HEALTH_URL\"" in DEPLOY_SCRIPT
+    assert "$HEALTH_URL" in DEPLOY_SCRIPT
+    # A probe without a response timeout hangs forever on a wedged
+    # event loop, which is the very thing it is meant to catch.
+    assert "--max-time" in DEPLOY_SCRIPT
 
 
 def test_deploy_rolls_back_on_failed_health():

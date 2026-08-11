@@ -803,13 +803,20 @@ def _resolve_public_key_by_fingerprint(
 
 
 def _is_managed_key(key_path: Path) -> bool:
-    """True if the app generated this key and may delete it."""
+    """True if the app generated this key and may delete it.
+
+    Living in the managed directory is not enough: the operator's own
+    ~/.ssh/id_ed25519 and unrelated keys share it. Only the naming
+    pattern from _generate_ssh_key_pair qualifies.
+    """
     managed_dir = _MANAGED_KEY_DIR.expanduser()
     try:
         resolved = key_path.expanduser().resolve()
-        return resolved.parent == managed_dir.resolve()
+        if resolved.parent != managed_dir.resolve():
+            return False
     except OSError:
         return False
+    return bool(re.fullmatch(r"id_ed25519_[A-Za-z0-9_-]+", resolved.name))
 
 
 def _generate_ssh_key_pair(server_name: str) -> tuple[str, str]:
@@ -1006,6 +1013,10 @@ app.mount(
 
 
 # ---- rate limiter ----
+# Cap on per-IP entries kept in memory and in auth.yaml.
+_MAX_TRACKED_IPS = 1000
+
+
 class _RateLimiter:
     """Simple in-memory per-IP rate limiter (sliding window)."""
 
@@ -1018,16 +1029,38 @@ class _RateLimiter:
         self._window = window_sec
         self._hits: dict[str, list[float]] = {}
 
+    def _prune(self, now: float) -> None:
+        """Forget keys with no hits left in the window.
+
+        Entries are only ever added while checking, so without this the
+        table grows for every source address ever seen — and the login
+        limiter is reachable before authentication.
+        """
+        cutoff = now - self._window
+        for key in list(self._hits):
+            live = [t for t in self._hits[key] if t > cutoff]
+            if live:
+                self._hits[key] = live
+            else:
+                del self._hits[key]
+        # A flood of fresh addresses within one window still grows the
+        # table, so cap it; the oldest entries go first.
+        excess = len(self._hits) - _MAX_TRACKED_IPS
+        if excess > 0:
+            for key in list(self._hits)[:excess]:
+                del self._hits[key]
+
     def is_limited(self, ip: str) -> bool:
         now = dt.datetime.now(dt.timezone.utc).timestamp()
         cutoff = now - self._window
-        hits = self._hits.get(ip, [])
-        hits = [t for t in hits if t > cutoff]
+        hits = [t for t in self._hits.get(ip, []) if t > cutoff]
         if len(hits) >= self._max:
             self._hits[ip] = hits
             return True
         hits.append(now)
         self._hits[ip] = hits
+        if len(self._hits) > _MAX_TRACKED_IPS:
+            self._prune(now)
         return False
 
 
@@ -1042,6 +1075,12 @@ def _limiter_key(ip: str) -> str:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return ip
+    # A dual-stack socket reports IPv4 clients as ::ffff:a.b.c.d, and
+    # every one of those shares the ::/64 prefix — grouping them would
+    # let one client's failures lock out everybody else.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
     if addr.version == 6:
         return str(ipaddress.ip_network(f"{addr}/64", strict=False))
     return str(addr)
@@ -1077,8 +1116,6 @@ _MAX_HISTORY = 20
 _SESSION_MAX_AGE_DAYS = 30
 _PBKDF2_ITERATIONS = 600_000
 _MIN_PASSWORD_LENGTH = 8
-# Cap on per-IP failure entries kept in auth.yaml.
-_MAX_TRACKED_IPS = 1000
 # One-time token gating first-run setup; None once a password exists.
 _setup_token: str | None = None
 
@@ -1195,8 +1232,11 @@ def _prune_login_state() -> None:
 def _record_login_failure(ip: str) -> int:
     """Count a failed attempt, blocking the address past the threshold.
 
-    Returns attempts remaining before the block kicks in.
+    Keys on the limiter prefix rather than the exact address, so an
+    IPv6 client cannot spread attempts across its own /64 and never
+    reach the threshold. Returns attempts remaining before the block.
     """
+    ip = _limiter_key(ip)
     with _AUTH_LOCK:
         count = _auth.fail_counts.get(ip, 0) + 1
         _auth.fail_counts[ip] = count
@@ -2080,17 +2120,20 @@ async def auth_login(
     request: Request,
 ) -> JSONResponse:
     ip = _client_ip(request)
+    # Both the limiter and the failure counter key on the prefix, so an
+    # IPv6 client cannot dodge either by walking its own /64.
+    ip_key = _limiter_key(ip)
     now = dt.datetime.now(dt.timezone.utc)
     # Rate limit before touching the password: the per-IP failure counter
     # below resets on block expiry, which on its own allows sustained
-    # guessing, and it is keyed on the exact address.
-    if _login_limiter.is_limited(_limiter_key(ip)):
+    # guessing.
+    if _login_limiter.is_limited(ip_key):
         return JSONResponse(
             {"detail": "Too many login attempts"},
             status_code=429,
         )
     # check block
-    blocked_ts = _auth.blocked_until.get(ip)
+    blocked_ts = _auth.blocked_until.get(ip_key)
     if blocked_ts:
         try:
             until = dt.datetime.fromisoformat(blocked_ts)
@@ -2107,8 +2150,8 @@ async def auth_login(
         except ValueError:
             pass
         with _AUTH_LOCK:
-            _auth.blocked_until.pop(ip, None)
-            _auth.fail_counts.pop(ip, None)
+            _auth.blocked_until.pop(ip_key, None)
+            _auth.fail_counts.pop(ip_key, None)
             _save_auth(_auth)
 
     if not _auth.password_hash:
@@ -2120,7 +2163,7 @@ async def auth_login(
     if not _verify_password(
         payload.password, _auth.password_hash,
     ):
-        remaining = _record_login_failure(ip)
+        remaining = _record_login_failure(ip_key)
         if remaining <= 0:
             return JSONResponse(
                 {
@@ -2149,8 +2192,10 @@ async def auth_login(
         _auth.session_created[token] = (
             now.isoformat()
         )
-        _auth.fail_counts.pop(ip, None)
-        _auth.blocked_until.pop(ip, None)
+        # Keyed like the failure path, or a success would never clear
+        # the block it was counted against.
+        _auth.fail_counts.pop(ip_key, None)
+        _auth.blocked_until.pop(ip_key, None)
         _auth.history.append(
             {
                 "time": now.strftime(
@@ -2195,8 +2240,17 @@ async def auth_logout(
 
 @app.get("/api/auth/settings")
 async def get_auth_settings() -> dict[str, Any]:
+    # Reachable unauthenticated before setup, where the whitelist and
+    # login history would be free reconnaissance. Setup only needs to
+    # know whether a password exists.
+    if not _auth.password_hash:
+        return {
+            "has_password": False,
+            "allowed_networks": [],
+            "history": [],
+        }
     return {
-        "has_password": bool(_auth.password_hash),
+        "has_password": True,
         "allowed_networks": _auth.allowed_networks,
         "history": _auth.history[-_MAX_HISTORY:],
     }
@@ -2206,6 +2260,20 @@ async def get_auth_settings() -> dict[str, Any]:
 async def update_auth_settings(
     payload: _SecuritySettingsRequest,
 ) -> dict[str, Any]:
+    # Before a password exists the whole endpoint is reachable, so the
+    # token gates every field — not just the password. Otherwise a
+    # payload carrying only allowed_networks slips through and can pin
+    # the whitelist to an attacker's address.
+    if not _auth.password_hash and not _check_setup_token(
+        payload.setup_token,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Invalid setup token. Find it in the service log: "
+                "journalctl -u servers-info-dash"
+            ),
+        )
     with _AUTH_LOCK:
         if payload.password:
             if len(payload.password) < _MIN_PASSWORD_LENGTH:
@@ -2229,16 +2297,8 @@ async def update_auth_settings(
                         status_code=403,
                         detail="Current password is incorrect",
                     )
-            # First run has no current password to prove, so the setup
-            # token from the service log takes its place.
-            elif not _check_setup_token(payload.setup_token):
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "Invalid setup token. Find it in the service log: "
-                        "journalctl -u servers-info-dash"
-                    ),
-                )
+            # First run needs no current password: the setup token
+            # checked above already stands in for it.
             _auth.password_hash = _hash_password(
                 payload.password,
             )
@@ -2501,11 +2561,13 @@ def _cleanup_server_key(
 ) -> None:
     if _is_key_fingerprint(client_key):
         return
-    key_path = Path(client_key).expanduser()
     # A caller-supplied client_key may point anywhere; deleting it would
-    # remove arbitrary files as the app user (root in production).
-    if not _is_managed_key(key_path):
+    # remove arbitrary files as the app user (root in production). Check
+    # and delete the same resolved path, so a symlink cannot make the
+    # two disagree about which file is meant.
+    if not _is_managed_key(Path(client_key)):
         return
+    key_path = Path(client_key).expanduser().resolve()
     # ".pub" must be appended, not substituted: with_suffix turns
     # "config.yaml" into "config.pub" — a file the caller never named.
     pub_path = Path(str(key_path) + ".pub")

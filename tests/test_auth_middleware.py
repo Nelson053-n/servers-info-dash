@@ -13,6 +13,8 @@ def client(main_module, monkeypatch):
         main_module, "_auth", main_module._AuthState(password_hash=""),
     )
     monkeypatch.setattr(main_module, "_setup_token", "test-setup-token")
+    # Setting a password writes auth.yaml; keep tests off the real one.
+    monkeypatch.setattr(main_module, "_save_auth", lambda state: None)
 
     # Startup launches the collector, which would SSH to the example
     # hosts. These tests only exercise routing.

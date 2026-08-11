@@ -260,7 +260,7 @@ tr:last-child td{border-bottom:none}
   </form>
 
   <div class="sec-form hidden" id="secPanel">
-    <input id="secSetupToken" class="full hidden"/>
+    <input id="secSetupToken" type="password" class="full hidden"/>
     <input id="secCurrentPassword" type="password"/>
     <input id="secPassword" type="password"/>
     <input id="secPasswordConfirm" type="password"/>
@@ -396,6 +396,7 @@ const I = {
     sec_pw_set: "Пароль задан",
     sec_pw_not_set: "Пароль не задан",
     sec_setup_hint: "Пароль не задан. Введите токен установки из журнала службы: journalctl -u servers-info-dash",
+    sec_load_failed: "не удалось загрузить настройки безопасности",
     ph_sec_setup_token: "Токен установки из журнала службы",
     ph_sec_cur_pw: "Текущий пароль",
     ph_sec_pw: "Новый пароль (мин. 8 символов, пусто = не менять)",
@@ -490,6 +491,7 @@ const I = {
     sec_pw_set: "Password is set",
     sec_pw_not_set: "No password set",
     sec_setup_hint: "No password set. Enter the setup token from the service log: journalctl -u servers-info-dash",
+    sec_load_failed: "could not load security settings",
     ph_sec_setup_token: "Setup token from the service log",
     ph_sec_cur_pw: "Current password",
     ph_sec_pw: "New password (min 8 chars, empty = keep)",
@@ -1281,7 +1283,13 @@ toggleSec.addEventListener("click", async () => {
         t("sec_history_title") + '</div>' + h +
         '<div style="padding:4px 8px;font-size:11px;color:var(--muted)">' +
         t("sec_reset_hint") + '</div>';
-    } catch(_) {}
+    } catch(_) {
+      /* leaving the fields in whatever state the markup defaults to
+         would show a current-password box that cannot work on first
+         run, with no explanation */
+      secMsg.textContent = t("error_prefix") + ": " + t("sec_load_failed");
+      secMsg.className = "msg bad";
+    }
   }
 });
 
