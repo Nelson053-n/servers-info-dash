@@ -905,6 +905,12 @@ def _generate_ssh_key_pair(server_name: str) -> tuple[str, str]:
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", server_name)
     ssh_dir = _MANAGED_KEY_DIR.expanduser()
     ssh_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # mode= applies only when mkdir creates the directory; a pre-existing
+    # ~/.ssh at 0755 would leave the key listing readable to everyone.
+    try:
+        ssh_dir.chmod(0o700)
+    except OSError:
+        logger.warning("could not tighten permissions on %s", ssh_dir)
 
     private_path = ssh_dir / f"id_ed25519_{safe_name}"
     if private_path.exists():
@@ -1705,12 +1711,19 @@ def _log_server_metrics(
                         ]
             except Exception:  # noqa: BLE001
                 fieldnames = _CSV_COLUMNS
+        if not fieldnames:
+            fieldnames = _CSV_COLUMNS
         with log_path.open("a", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            # extrasaction="ignore": the header comes from the file, so a
+            # legacy or hand-edited one naming its first column something
+            # else would otherwise raise and kill logging for the day.
+            writer = csv.DictWriter(
+                fh, fieldnames=fieldnames, extrasaction="ignore",
+            )
             if write_header:
                 writer.writeheader()
             row = {
-                "timestamp": dt.datetime.now(
+                fieldnames[0]: dt.datetime.now(
                     dt.timezone.utc,
                 ).strftime("%Y-%m-%d %H:%M"),
             }
@@ -2293,6 +2306,17 @@ async def _start_background_tasks() -> None:
             token,
         )
     asyncio.create_task(_background_collector())
+
+
+@app.on_event("shutdown")
+async def _stop_background_tasks() -> None:
+    # Without this the pooled SSH connections are torn down by process
+    # exit rather than closed, leaving sessions on the monitored hosts
+    # to time out on their own.
+    try:
+        await collector.close_pool()
+    except Exception:  # noqa: BLE001
+        logger.warning("failed to close SSH pool cleanly", exc_info=True)
 
 
 # ---- auth endpoints ----
