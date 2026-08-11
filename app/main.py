@@ -1939,14 +1939,23 @@ async def _check_and_notify(
         name = srv.get("name", "?")
         counts = _trigger_counts.setdefault(name, {})
         triggered: set[str] = set()
+        is_down = srv.get("status") == "down"
 
         # --- check each metric ---
-        if bot.notify_down and srv.get("status") == "down":
+        if bot.notify_down and is_down:
             counts["down"] = counts.get("down", 0) + 1
         else:
             counts["down"] = 0
         if counts.get("down", 0) >= delay:
             triggered.add("down")
+
+        # Every metric reads None while the host is unreachable, and the
+        # threshold checks below cannot tell that apart from "back under
+        # the threshold": they would reset the counters and report a
+        # recovery in the same message as the outage. Snapshot the
+        # counters now and restore them afterwards, so a down host
+        # freezes its metric alerts instead of clearing them.
+        frozen = dict(counts) if is_down else None
 
         cpu = srv.get("cpu_percent")
         if (
@@ -2013,6 +2022,13 @@ async def _check_and_notify(
             triggered.add("tx")
 
         prev = _notified_state.get(name, set())
+        if frozen is not None:
+            # Host is down: keep the metric counters and alerts exactly
+            # as they were, so only the outage itself is reported.
+            counts.clear()
+            counts.update(frozen)
+            counts["down"] = frozen.get("down", 0) + 1
+            triggered = (triggered & {"down"}) | (prev - {"down"})
         new_alerts = triggered - prev
         recovered = prev - triggered
         _notified_state[name] = triggered
