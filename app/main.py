@@ -1031,7 +1031,32 @@ class _RateLimiter:
         return False
 
 
+def _limiter_key(ip: str) -> str:
+    """Group an address into one rate-limit bucket.
+
+    A single IPv6 host is routinely handed a whole /64, so keying on the
+    exact address lets one client cycle through billions of them. IPv4
+    addresses are used as-is.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
 _api_limiter = _RateLimiter(max_requests=30, window_sec=60)
+
+# Login is the one endpoint an unauthenticated caller may hammer, so it
+# gets a tighter budget than the authenticated API.
+_LOGIN_MAX_PER_WINDOW = 10
+_LOGIN_WINDOW_SEC = 300
+_login_limiter = _RateLimiter(
+    max_requests=_LOGIN_MAX_PER_WINDOW,
+    window_sec=_LOGIN_WINDOW_SEC,
+)
 
 _RATE_LIMITED_PREFIXES = (
     "/api/servers",
@@ -1052,6 +1077,8 @@ _MAX_HISTORY = 20
 _SESSION_MAX_AGE_DAYS = 30
 _PBKDF2_ITERATIONS = 600_000
 _MIN_PASSWORD_LENGTH = 8
+# Cap on per-IP failure entries kept in auth.yaml.
+_MAX_TRACKED_IPS = 1000
 # One-time token gating first-run setup; None once a password exists.
 _setup_token: str | None = None
 
@@ -1128,6 +1155,62 @@ def _save_auth(state: _AuthState) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _prune_login_state() -> None:
+    """Drop expired blocks and cap how much failure state is kept.
+
+    fail_counts and blocked_until are persisted to auth.yaml on every
+    failed login, so an unbounded dictionary is both a memory leak and a
+    growing disk write on each attempt.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    for ip, until in list(_auth.blocked_until.items()):
+        try:
+            if dt.datetime.fromisoformat(until) <= now:
+                _auth.blocked_until.pop(ip, None)
+                _auth.fail_counts.pop(ip, None)
+        except ValueError:
+            _auth.blocked_until.pop(ip, None)
+
+    # Still oversized after expiry: drop the oldest entries first, but
+    # never evict an address that is currently blocked — that would hand
+    # an attacker a way to clear their own block by flooding new IPs.
+    excess = len(_auth.fail_counts) - _MAX_TRACKED_IPS
+    if excess > 0:
+        for ip in list(_auth.fail_counts):
+            if excess <= 0:
+                break
+            if ip in _auth.blocked_until:
+                continue
+            _auth.fail_counts.pop(ip, None)
+            excess -= 1
+    excess = len(_auth.blocked_until) - _MAX_TRACKED_IPS
+    if excess > 0:
+        for ip in list(_auth.blocked_until)[:excess]:
+            _auth.blocked_until.pop(ip, None)
+            _auth.fail_counts.pop(ip, None)
+
+
+def _record_login_failure(ip: str) -> int:
+    """Count a failed attempt, blocking the address past the threshold.
+
+    Returns attempts remaining before the block kicks in.
+    """
+    with _AUTH_LOCK:
+        count = _auth.fail_counts.get(ip, 0) + 1
+        _auth.fail_counts[ip] = count
+        if count >= _MAX_LOGIN_ATTEMPTS:
+            until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                minutes=_BLOCK_MINUTES,
+            )
+            _auth.blocked_until[ip] = until.isoformat()
+            _auth.fail_counts[ip] = 0
+        # Prune after recording, so this address is not evicted by its
+        # own insertion and the caps actually hold.
+        _prune_login_state()
+        _save_auth(_auth)
+    return _MAX_LOGIN_ATTEMPTS - count
 
 
 def _ensure_setup_token() -> str | None:
@@ -1998,6 +2081,14 @@ async def auth_login(
 ) -> JSONResponse:
     ip = _client_ip(request)
     now = dt.datetime.now(dt.timezone.utc)
+    # Rate limit before touching the password: the per-IP failure counter
+    # below resets on block expiry, which on its own allows sustained
+    # guessing, and it is keyed on the exact address.
+    if _login_limiter.is_limited(_limiter_key(ip)):
+        return JSONResponse(
+            {"detail": "Too many login attempts"},
+            status_code=429,
+        )
     # check block
     blocked_ts = _auth.blocked_until.get(ip)
     if blocked_ts:
@@ -2029,19 +2120,7 @@ async def auth_login(
     if not _verify_password(
         payload.password, _auth.password_hash,
     ):
-        with _AUTH_LOCK:
-            c = _auth.fail_counts.get(ip, 0) + 1
-            _auth.fail_counts[ip] = c
-            if c >= _MAX_LOGIN_ATTEMPTS:
-                until = now + dt.timedelta(
-                    minutes=_BLOCK_MINUTES,
-                )
-                _auth.blocked_until[ip] = (
-                    until.isoformat()
-                )
-                _auth.fail_counts[ip] = 0
-            _save_auth(_auth)
-        remaining = _MAX_LOGIN_ATTEMPTS - c
+        remaining = _record_login_failure(ip)
         if remaining <= 0:
             return JSONResponse(
                 {
