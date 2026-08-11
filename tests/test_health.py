@@ -34,10 +34,36 @@ def test_deploy_rolls_back_on_failed_health():
     assert 'git reset --hard "$local_sha"' in DEPLOY_SCRIPT
 
 
-def test_traffic_attach_runs_off_event_loop():
-    """Traffic maps read every CSV — must not block the event loop."""
-    body = SOURCE.split("async def _background_collector", 1)[1]
-    body = body.split("@app.on_event", 1)[0]
-    for fn in ("_attach_traffic_30d", "_attach_traffic_1d"):
-        assert f"None, {fn}, data[\"servers\"]" in body, fn
-        assert f"{fn}(data[\"servers\"])" not in body, fn
+def test_traffic_attach_runs_off_event_loop(main_module, monkeypatch):
+    """Traffic maps read every CSV — must not block the event loop.
+
+    Checked by running a cycle and recording which thread each traffic
+    call lands on, so an equivalent refactor does not fail this while a
+    real regression does.
+    """
+    import asyncio
+    import threading
+
+    main_thread = threading.get_ident()
+    threads = {}
+
+    def _record(name):
+        def _fn(servers):
+            threads[name] = threading.get_ident()
+        return _fn
+
+    async def _collect():
+        return {"servers": [], "generated_at": "", "ready": True}
+
+    monkeypatch.setattr(main_module.collector, "collect_all", _collect)
+    monkeypatch.setattr(
+        main_module, "_attach_traffic_30d", _record("30d"),
+    )
+    monkeypatch.setattr(main_module, "_attach_traffic_1d", _record("1d"))
+    monkeypatch.setattr(main_module, "_log_server_metrics", lambda s: None)
+
+    asyncio.run(main_module._run_collector_cycle(0))
+
+    assert set(threads) == {"30d", "1d"}, f"not called: {threads}"
+    for name, tid in threads.items():
+        assert tid != main_thread, f"{name} ran on the event loop thread"

@@ -108,6 +108,8 @@ class PreviousSample:
 
 class MetricsCollector:
     _PING_INTERVAL: float = 30.0  # seconds between ping measurements
+    # ping's own -W bounds the reply wait but not name resolution
+    _PING_TIMEOUT_SEC: float = 5.0
 
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
@@ -304,7 +306,23 @@ class MetricsCollector:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await process.communicate()
+        # ping's -W bounds the reply wait but not name resolution, so a
+        # wedged resolver leaves this await pending forever. That hangs
+        # the whole collector loop without raising, which its try/except
+        # cannot catch.
+        try:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self._PING_TIMEOUT_SEC,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            try:
+                process.kill()
+                await process.wait()
+            except (ProcessLookupError, OSError):
+                pass
+            logger.warning("ping to %s timed out", host)
+            return None
         out = stdout.decode(errors="ignore")
 
         patterns = [
@@ -1541,6 +1559,8 @@ _TRAFFIC_30D_CACHE_TTL_SEC = 300
 _TRAFFIC_1D_CACHE_TTL_SEC = 60
 # how many refresh intervals may pass before /api/health reports 503
 _HEALTH_MAX_AGE_CYCLES = 3
+# a cycle is abandoned after this many refresh intervals
+_CYCLE_TIMEOUT_CYCLES = 4
 
 _CSV_COLUMNS = [
     "timestamp", "name", "host", "status",
@@ -2055,36 +2075,53 @@ async def _check_and_notify(
         )
 
 
-async def _background_collector() -> None:
+async def _run_collector_cycle(rotation_counter: int) -> int:
+    """One collection pass. Returns the updated rotation counter."""
     global _cached_metrics
-    _rotation_counter = 0
+    data = await collector.collect_all()
+    # traffic maps re-read every CSV log file, which takes
+    # seconds once logs grow — keep it off the event loop
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None, _attach_traffic_30d, data["servers"],
+    )
+    await loop.run_in_executor(
+        None, _attach_traffic_1d, data["servers"],
+    )
+    data["ready"] = True
+    async with _metrics_lock:
+        _cached_metrics = data
+    await _check_and_notify(data["servers"])
+    # write metrics to CSV log files
+    await loop.run_in_executor(
+        None, _log_server_metrics, data["servers"],
+    )
+    # rotate old logs once every ~100 cycles
+    rotation_counter += 1
+    if rotation_counter >= 100:
+        rotation_counter = 0
+        await loop.run_in_executor(
+            None, _rotate_logs,
+        )
+    return rotation_counter
+
+
+async def _background_collector() -> None:
+    rotation_counter = 0
     while True:
         try:
-            data = await collector.collect_all()
-            # traffic maps re-read every CSV log file, which takes
-            # seconds once logs grow — keep it off the event loop
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, _attach_traffic_30d, data["servers"],
+            # A cycle that hangs — a wedged executor thread, a socket
+            # that never answers — would otherwise stop collection for
+            # good: try/except only catches raising, not waiting.
+            rotation_counter = await asyncio.wait_for(
+                _run_collector_cycle(rotation_counter),
+                timeout=cfg.refresh_interval_sec * _CYCLE_TIMEOUT_CYCLES,
             )
-            await loop.run_in_executor(
-                None, _attach_traffic_1d, data["servers"],
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error(
+                "collector cycle exceeded %ss, abandoning it",
+                cfg.refresh_interval_sec * _CYCLE_TIMEOUT_CYCLES,
             )
-            data["ready"] = True
-            async with _metrics_lock:
-                _cached_metrics = data
-            await _check_and_notify(data["servers"])
-            # write metrics to CSV log files
-            await loop.run_in_executor(
-                None, _log_server_metrics, data["servers"],
-            )
-            # rotate old logs once every ~100 cycles
-            _rotation_counter += 1
-            if _rotation_counter >= 100:
-                _rotation_counter = 0
-                await loop.run_in_executor(
-                    None, _rotate_logs,
-                )
         except Exception:  # noqa: BLE001
             logger.exception("background collector cycle failed")
         await asyncio.sleep(cfg.refresh_interval_sec)
