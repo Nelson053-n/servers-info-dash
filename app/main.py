@@ -1186,12 +1186,24 @@ def _save_auth(state: _AuthState) -> None:
             -_MAX_HISTORY:
         ],
     }
-    _AUTH_PATH.write_text(
-        yaml.safe_dump(
-            data, sort_keys=False, allow_unicode=True,
-        ),
-        encoding="utf-8",
+    # Session tokens and the password hash are stored in the clear, so
+    # the file must never be world-readable. Set the mode before writing
+    # rather than after, or the contents sit at the umask default for
+    # the duration of the write.
+    fd = os.open(
+        _AUTH_PATH,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(
+                data, fh, sort_keys=False, allow_unicode=True,
+            )
+    finally:
+        # O_CREAT only applies the mode to a new file; an existing one
+        # deployed at 0644 keeps its old permissions without this.
+        _AUTH_PATH.chmod(0o600)
 
 
 def _prune_login_state() -> None:
