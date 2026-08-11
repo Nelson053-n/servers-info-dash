@@ -1,6 +1,11 @@
-fastapi>=0.116.1
-uvicorn[standard]>=0.35.0
-asyncssh>=2.21.0
+# Upper bounds matter here: the host pulls from GitHub and runs
+# pip install unattended, so a new major release upstream would land in
+# production without review — and the rollback reinstalls from the same
+# unpinned file, so it would not undo the breakage either.
+# Lower bounds are the versions running in production as of 2026-08-12.
+fastapi>=0.116.1,<1
+uvicorn[standard]>=0.35.0,<1
+asyncssh>=2.21.0,<3
 pydantic>=2.11.7,<3
-PyYAML>=6.0.2
-psutil>=7.0.0
+PyYAML>=6.0.2,<7
+psutil>=7.0.0,<8

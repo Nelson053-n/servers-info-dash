@@ -10,6 +10,9 @@ APP_USER=${APP_USER:-serversdash}
 SERVICE=${SERVICE:-servers-info-dash.service}
 HEALTH_URL=${HEALTH_URL:-http://127.0.0.1:8000/api/health}
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-90}
+# Consecutive failed origin checks before alerting (5 min apart).
+STATE_FILE=${STATE_FILE:-/var/lib/dash-autodeploy/unreachable}
+UNREACHABLE_ALERT_AFTER=${UNREACHABLE_ALERT_AFTER:-12}
 
 log() { echo "$*"; }
 
@@ -99,6 +102,7 @@ rollback() {
 # systemd will not re-trigger a running oneshot, but a manual
 # `systemctl start` or a hand-run script during a slow deploy would
 # interleave two git resets in the same tree.
+mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
 exec 9>"${LOCK_FILE:-/run/dash-autodeploy.lock}"
 if ! flock -n 9; then
     log "another deploy is in progress, skipping this run"
@@ -142,9 +146,23 @@ remote_sha=$(runuser -u "$APP_USER" -- git ls-remote origin refs/heads/main 2>/d
     | cut -f1)
 
 if [ -z "$remote_sha" ]; then
-    log "cannot reach origin, skipping this run"
+    # A transient network blip is normal; being unable to reach origin
+    # for hours is a dead deploy pipeline, and it used to fail silently
+    # because this path never alerted.
+    misses=$(cat "$STATE_FILE" 2>/dev/null || echo 0)
+    case "$misses" in ''|*[!0-9]*) misses=0 ;; esac
+    misses=$((misses + 1))
+    echo "$misses" > "$STATE_FILE" 2>/dev/null || true
+    log "cannot reach origin (consecutive misses: $misses)"
+    if [ "$misses" = "$UNREACHABLE_ALERT_AFTER" ]; then
+        notify "⚠️ <b>Автодеплой не видит GitHub</b>
+Подряд неудачных проверок: ${misses}.
+Обновления не приезжают — проверьте сеть, права или репозиторий."
+    fi
     exit 0
 fi
+# Origin answered: reset the miss counter.
+rm -f "$STATE_FILE" 2>/dev/null || true
 if [ "$local_sha" = "$remote_sha" ]; then
     exit 0
 fi

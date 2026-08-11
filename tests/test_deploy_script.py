@@ -189,3 +189,44 @@ def test_unreachable_origin_skips_quietly(deploy):
     assert proc.returncode == 0
     assert "cannot reach origin" in proc.stdout
     assert "restart" not in calls
+
+
+def test_repeated_unreachable_origin_alerts(deploy, tmp_path):
+    """A pipeline dead for hours must not stay silent."""
+    state = tmp_path / "misses"
+    # One short of the threshold: the next run is the one that alerts.
+    state.write_text("2", encoding="utf-8")
+
+    proc, _ = deploy(
+        REMOTE_SHA="", STATE_FILE=str(state), UNREACHABLE_ALERT_AFTER=3,
+    )
+
+    assert proc.returncode == 0
+    assert "consecutive misses: 3" in proc.stdout, proc.stdout
+    assert state.read_text(encoding="utf-8").strip() == "3"
+    # notify has no venv to run in here, and says so — which is the
+    # observable evidence that it was called at all.
+    assert "notify failed" in proc.stdout, (
+        f"no alert attempted at the threshold: {proc.stdout}"
+    )
+
+
+def test_below_threshold_stays_quiet(deploy, tmp_path):
+    """Transient blips must not alert on every run."""
+    state = tmp_path / "misses"
+
+    proc, _ = deploy(
+        REMOTE_SHA="", STATE_FILE=str(state), UNREACHABLE_ALERT_AFTER=3,
+    )
+
+    assert "consecutive misses: 1" in proc.stdout
+    assert "notify failed" not in proc.stdout, "alerted on the first miss"
+
+
+def test_reachable_origin_resets_the_miss_counter(deploy, tmp_path):
+    state = tmp_path / "misses"
+    state.write_text("7", encoding="utf-8")
+
+    deploy(STATE_FILE=str(state))
+
+    assert not state.exists(), "miss counter survived a successful check"
