@@ -87,6 +87,8 @@ th[data-key="traffic_1d_gb"], th[data-key="traffic_30d_gb"] { font-size: 0.85em;
 .msg{font-size:13px;color:var(--muted)}
 .msg.ok{color:var(--ok)}.msg.bad{color:var(--bad)}
 /* table */
+/* figures are known to be out of date — do not let them read as live */
+table.stale{opacity:.45;filter:grayscale(.6)}
 table{width:100%;border-collapse:collapse;background:var(--panel);
   border:1px solid var(--line);border-radius:10px;overflow:hidden}
 th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
@@ -1101,7 +1103,11 @@ let _notReadyCount = 0;
 async function refresh() {
   try {
     const r = await fetch("/api/metrics", {cache: "no-store"});
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) {
+      const err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
     const data = await r.json();
     if (!data.ready) {
       _notReadyCount++;
@@ -1130,9 +1136,22 @@ async function refresh() {
     }
     /* sync SSH mode button */
     _syncSshBtn(data.persistent_ssh);
+    _markStale(false);
   } catch (err) {
+    /* a monitoring dashboard showing yesterday's numbers as if they
+       were live is worse than one that admits it lost the server */
     meta.textContent = t("error_update") + ": " + err.message;
+    _markStale(true);
+    if (err.status === 401) {
+      checkAuth();
+    }
   }
+}
+
+/* Dim the table while the figures on it are known to be out of date. */
+function _markStale(stale) {
+  const box = document.querySelector("table");
+  if (box) box.classList.toggle("stale", stale);
 }
 
 /* =========  interval selector  ========= */
@@ -1189,8 +1208,11 @@ async function checkAuth() {
     isAuthed = true;
     logoutBtn.classList.toggle("hidden", !d.has_password);
   } catch(_) {
-    isAuthed = true;
-    loginOvl.classList.add("hidden");
+    /* the backend is unreachable, which says nothing about whether
+       this browser is signed in — assuming it is shows a full UI whose
+       every action then fails with 401 */
+    meta.textContent = t("error_prefix") + ": " + t("sec_load_failed");
+    _markStale(true);
   }
 }
 
