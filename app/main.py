@@ -1632,6 +1632,13 @@ def _read_traffic_rows(
         reader = csv.reader(fh)
         _ = next(reader, None)  # header
         for values in reader:
+            # csv.reader accepts NUL bytes and hands them back inside
+            # the fields, so a log truncated by a crash would otherwise
+            # feed \x00 into the traffic sums instead of being skipped.
+            if any("\x00" in value for value in values):
+                raise csv.Error(
+                    f"NUL byte in {file_path.name}, file is corrupted",
+                )
             # Handle mixed schemas in legacy files:
             # old: 12 columns, new: 15 columns.
             if len(values) >= 15:
