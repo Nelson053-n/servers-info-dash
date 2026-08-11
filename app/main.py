@@ -209,8 +209,17 @@ class MetricsCollector:
             if count < self._error_threshold:
                 cached = self._last_good.get(server.name)
                 if cached:
-                    cached["ping_ms"] = ping_ms
-                    return cached
+                    # Copy, or callers that decorate the result (traffic
+                    # totals, renames) write straight into the cache.
+                    stale = dict(cached)
+                    stale["ping_ms"] = ping_ms
+                    # Rates were measured cycles ago; logging them again
+                    # invents traffic that never crossed the wire.
+                    stale["rx_mbps"] = None
+                    stale["tx_mbps"] = None
+                    stale["stale"] = True
+                    stale["error"] = f"stale ({count}): {exc}"
+                    return stale
             base["error"] = str(exc)
             return base
 
@@ -550,9 +559,18 @@ class MetricsCollector:
         if len(parts) < 6 or parts[0] != "cpu":
             raise RuntimeError("Invalid /proc/stat format")
 
-        values = [int(item) for item in parts[1:9]]
-        cpu_total = sum(values)
-        cpu_idle = values[3] + values[4]
+        # A malformed line must fail as a parse error, not as a raw
+        # ValueError/IndexError: callers distinguish "bad output" from
+        # a crash, and an unexpected type serves cached data for five
+        # cycles as if it were current.
+        try:
+            values = [int(item) for item in parts[1:9]]
+            cpu_total = sum(values)
+            cpu_idle = values[3] + values[4]
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError(
+                f"Invalid /proc/stat values: {exc}",
+            ) from exc
         return cpu_total, cpu_idle
 
     @staticmethod
@@ -571,8 +589,14 @@ class MetricsCollector:
             counters = counters_raw.split()
             if len(counters) < 16:
                 continue
-            rx_bytes = int(counters[0])
-            tx_bytes = int(counters[8])
+            # Any line with a colon and enough tokens reaches here — a
+            # motd or sudo warning in the stream would otherwise raise
+            # and fail the whole server's collection.
+            try:
+                rx_bytes = int(counters[0])
+                tx_bytes = int(counters[8])
+            except ValueError:
+                continue
             candidates.append((iface, rx_bytes, tx_bytes))
 
         if not candidates:
@@ -633,10 +657,15 @@ class MetricsCollector:
         for line in section.splitlines():
             parts = line.split()
             if len(parts) >= 2:
-                if parts[0] == "MemTotal:":
-                    total_kb = int(parts[1])
-                elif parts[0] == "MemAvailable:":
-                    avail_kb = int(parts[1])
+                # Unknown memory is reported as unknown; raising here
+                # would hide it behind five cycles of cached values.
+                try:
+                    if parts[0] == "MemTotal:":
+                        total_kb = int(parts[1])
+                    elif parts[0] == "MemAvailable:":
+                        avail_kb = int(parts[1])
+                except ValueError:
+                    return None, None
         if total_kb is None:
             return None, None
         total_gb = round(total_kb / 1_048_576, 1)
