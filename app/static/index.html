@@ -775,7 +775,8 @@ function renderArrows() {
 
 /* =========  disk bar  ========= */
 function diskHtml(item) {
-  if (item.disk_total_gb == null) return "\u2014";
+  /* zero total would make the percentage NaN and emit width:NaN% */
+  if (!item.disk_total_gb) return "\u2014";
   const f = item.disk_free_gb, tot = item.disk_total_gb;
   const pct = Math.min(100, Math.max(0, ((tot - f) / tot) * 100));
   let c = "var(--ok)";
@@ -789,7 +790,8 @@ function diskHtml(item) {
 
 /* =========  ram bar  ========= */
 function ramHtml(item) {
-  if (item.ram_total_gb == null) return "\u2014";
+  /* zero total would make the percentage NaN and emit width:NaN% */
+  if (!item.ram_total_gb) return "\u2014";
   const u = item.ram_used_gb, tot = item.ram_total_gb;
   const pct = Math.min(100, Math.max(0, (u / tot) * 100));
   let c = "var(--ok)";
@@ -903,7 +905,12 @@ rows.addEventListener("dblclick", (e) => {
   }
   inp.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") commit();
-    if (ev.key === "Escape") renderTable();
+    if (ev.key === "Escape") {
+      /* renderTable removes the input, which fires blur -> commit;
+         without this, cancelling renames the server anyway */
+      done = true;
+      renderTable();
+    }
   });
   inp.addEventListener("blur", commit);
 });
@@ -1099,16 +1106,41 @@ confYes.addEventListener("click", async () => {
 });
 
 /* =========  refresh  ========= */
+/* Applied even while the collector is not ready: otherwise a dead
+   collector leaves the client polling at the 2s startup rate instead of
+   the configured interval. */
+function _syncInterval(data) {
+  if (!data || !data.refresh_interval_sec) return;
+  const selEl = $("intervalSelect");
+  if (selEl && String(data.refresh_interval_sec) !== selEl.value) {
+    selEl.value = String(data.refresh_interval_sec);
+  }
+  const next = data.refresh_interval_sec * 1000;
+  if (next !== intervalMs) {
+    intervalMs = next;
+    clearInterval(window.__di);
+    window.__di = setInterval(refresh, intervalMs);
+  }
+}
+
 let _notReadyCount = 0;
+let _refreshGen = 0;
 async function refresh() {
+  /* a slow cycle can still be in flight when the next tick fires; without
+     a generation check a late reply overwrites a newer one and the
+     figures visibly jump backwards */
+  const gen = ++_refreshGen;
   try {
     const r = await fetch("/api/metrics", {cache: "no-store"});
+    if (gen !== _refreshGen) return;
     if (!r.ok) {
       const err = new Error("HTTP " + r.status);
       err.status = r.status;
       throw err;
     }
     const data = await r.json();
+    if (gen !== _refreshGen) return;
+    _syncInterval(data);
     if (!data.ready) {
       _notReadyCount++;
       meta.textContent = _notReadyCount > 5 ? t("collecting_long") : t("collecting");
@@ -1123,17 +1155,6 @@ async function refresh() {
     lastMeta = data;
     renderTable();
     showMeta(data);
-    /* sync interval selector with server value */
-    const selEl = $("intervalSelect");
-    if (selEl && String(data.refresh_interval_sec) !== selEl.value) {
-      selEl.value = String(data.refresh_interval_sec);
-    }
-    const next = data.refresh_interval_sec * 1000;
-    if (next !== intervalMs) {
-      intervalMs = next;
-      clearInterval(window.__di);
-      window.__di = setInterval(refresh, intervalMs);
-    }
     /* sync SSH mode button */
     _syncSshBtn(data.persistent_ssh);
     _markStale(false);
