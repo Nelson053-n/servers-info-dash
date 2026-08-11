@@ -1595,6 +1595,8 @@ _TRAFFIC_1D_CACHE_TTL_SEC = 60
 _HEALTH_MAX_AGE_CYCLES = 3
 # a cycle is abandoned after this many refresh intervals
 _CYCLE_TIMEOUT_CYCLES = 4
+# gaps longer than this are treated as a collector outage, not traffic
+_MAX_SAMPLE_GAP_SEC = 900
 
 _CSV_COLUMNS = [
     "timestamp", "name", "host", "status",
@@ -1687,13 +1689,17 @@ def _rotate_logs() -> None:
 
 def _read_traffic_rows(
     file_path: Path,
-) -> list[tuple[str, str, str]]:
-    """Read (name, rx, tx) triples from one CSV log file.
+) -> list[tuple[str, str, str, str]]:
+    """Read (name, rx, tx, timestamp) rows from one CSV log file.
+
+    The timestamp is needed to turn instantaneous Mbit/s samples into a
+    volume: the gap between consecutive rows is the period each sample
+    stands for, and it is not necessarily today's refresh interval.
 
     Raises csv.Error on corrupted files (e.g. NUL bytes), letting
     callers skip that file instead of failing the whole calculation.
     """
-    rows: list[tuple[str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     with file_path.open(encoding="utf-8", newline="") as fh:
         reader = csv.reader(fh)
         _ = next(reader, None)  # header
@@ -1712,14 +1718,38 @@ def _read_traffic_rows(
                     values[1] if len(values) > 1 else "",
                     values[11] if len(values) > 11 else "",
                     values[12] if len(values) > 12 else "",
+                    values[0] if values else "",
                 ))
             elif len(values) >= 12:
                 rows.append((
                     values[1] if len(values) > 1 else "",
                     values[8] if len(values) > 8 else "",
                     values[9] if len(values) > 9 else "",
+                    values[0] if values else "",
                 ))
     return rows
+
+
+def _sample_period_sec(
+    timestamp: str,
+    previous: dt.datetime | None,
+) -> tuple[float | None, dt.datetime | None]:
+    """Seconds a sample covers, from the gap to the previous row.
+
+    Returns (period, parsed timestamp). The period is None for the first
+    row of a series and for gaps too long to be one interval — a
+    collector outage must not be billed as continuous traffic.
+    """
+    try:
+        parsed = dt.datetime.strptime(timestamp.strip(), "%Y-%m-%d %H:%M")
+    except (ValueError, AttributeError):
+        return None, previous
+    if previous is None:
+        return None, parsed
+    gap = (parsed - previous).total_seconds()
+    if gap <= 0 or gap > _MAX_SAMPLE_GAP_SEC:
+        return None, parsed
+    return gap, parsed
 
 
 def _calculate_traffic_30d_gb() -> dict[str, float]:
@@ -1749,12 +1779,19 @@ def _calculate_traffic_30d_gb() -> dict[str, float]:
             )
             continue
 
-        for row_name, rx_raw, tx_raw in rows:
+        # Tracked per server: rows for different servers interleave
+        # within one file, so a shared cursor would measure the wrong gap.
+        last_seen: dict[str, dt.datetime | None] = {}
+        for row_name, rx_raw, tx_raw, row_ts in rows:
             row_key = (
                 _safe_filename(row_name)
                 if row_name
                 else safe_name
             )
+            period_sec, parsed = _sample_period_sec(
+                row_ts, last_seen.get(row_key),
+            )
+            last_seen[row_key] = parsed
             try:
                 rx = float(rx_raw or 0.0)
             except (TypeError, ValueError):
@@ -1765,10 +1802,11 @@ def _calculate_traffic_30d_gb() -> dict[str, float]:
                 tx = 0.0
             if rx <= 0 and tx <= 0:
                 continue
+            if period_sec is None:
+                # First sample of a series, or a gap too long to trust.
+                continue
             row_total = totals_raw.get(row_key, 0.0)
-            period_megabits = (
-                (rx + tx) * cfg.refresh_interval_sec
-            )
+            period_megabits = (rx + tx) * period_sec
             period_megabytes = period_megabits / 8.0
             period_gigabytes = period_megabytes / 1000.0
             row_total += period_gigabytes
@@ -1807,12 +1845,19 @@ def _calculate_traffic_1d_gb() -> dict[str, float]:
             )
             continue
 
-        for row_name, rx_raw, tx_raw in rows:
+        # Tracked per server: rows for different servers interleave
+        # within one file, so a shared cursor would measure the wrong gap.
+        last_seen: dict[str, dt.datetime | None] = {}
+        for row_name, rx_raw, tx_raw, row_ts in rows:
             row_key = (
                 _safe_filename(row_name)
                 if row_name
                 else safe_name
             )
+            period_sec, parsed = _sample_period_sec(
+                row_ts, last_seen.get(row_key),
+            )
+            last_seen[row_key] = parsed
             try:
                 rx = float(rx_raw or 0.0)
             except (TypeError, ValueError):
@@ -1823,10 +1868,11 @@ def _calculate_traffic_1d_gb() -> dict[str, float]:
                 tx = 0.0
             if rx <= 0 and tx <= 0:
                 continue
+            if period_sec is None:
+                # First sample of a series, or a gap too long to trust.
+                continue
             row_total = totals_raw.get(row_key, 0.0)
-            period_megabits = (
-                (rx + tx) * cfg.refresh_interval_sec
-            )
+            period_megabits = (rx + tx) * period_sec
             period_megabytes = period_megabits / 8.0
             period_gigabytes = period_megabytes / 1000.0
             row_total += period_gigabytes

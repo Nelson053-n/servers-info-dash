@@ -46,17 +46,27 @@ def test_intact_log_is_read(main_module, tmp_path):
 
     rows = main_module._read_traffic_rows(good)
 
-    assert rows == [("srv", "8.5", "9.5")]
+    assert rows == [("srv", "8.5", "9.5", "2026-08-03 02:17")]
 
 
 def test_corrupted_file_is_skipped_not_fatal(main_module, tmp_path, monkeypatch):
     """One bad log must not zero out the whole traffic calculation."""
     monkeypatch.setattr(main_module, "_LOGS_DIR", tmp_path)
-    # Totals are keyed by the name column, not the filename.
-    _write_log(tmp_path / "healthy_2026-08-03.csv")
+    # Totals are keyed by the name column, not the filename. Two rows
+    # are needed for a volume: the gap between them is the period.
+    _write_log(
+        tmp_path / "healthy_2026-08-03.csv",
+        row=(
+            "2026-08-03 02:17,srv,1.2.3.4,up,1,2,3,4,5,6,7,8.5,9.5,eth0,\n"
+            "2026-08-03 02:18,srv,1.2.3.4,up,1,2,3,4,5,6,7,8.5,9.5,eth0,\n"
+        ),
+    )
     _write_log(
         tmp_path / "broken_2026-08-03.csv",
-        row="2026-08-03 02:17,other,1.2.3.4,up,1,2,3,4,5,6,7,8.5,9.5,eth0,\n",
+        row=(
+            "2026-08-03 02:17,other,1.2.3.4,up,1,2,3,4,5,6,7,8.5,9.5,eth0,\n"
+            "2026-08-03 02:18,other,1.2.3.4,up,1,2,3,4,5,6,7,8.5,9.5,eth0,\n"
+        ),
         trailer=b"\x00" * 50,
     )
 
