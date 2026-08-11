@@ -118,7 +118,11 @@ class MetricsCollector:
         self._last_good: dict[str, dict[str, Any]] = {}
         self._error_threshold: int = 5
         self._pool: dict[str, asyncssh.SSHClientConnection] = {}
-        self._pool_lock = asyncio.Lock()
+        # One lock per pool key, not one for the pool: a single lock held
+        # across asyncssh.connect() serialises every server and undoes
+        # the asyncio.gather in collect_all.
+        self._pool_locks: dict[str, asyncio.Lock] = {}
+        self._pool_lock = asyncio.Lock()  # guards _pool_locks itself
         self._ping_cache: dict[str, float] = {}
         self._ping_last_time: dict[str, float] = {}
 
@@ -362,6 +366,12 @@ class MetricsCollector:
         """Get or create a persistent SSH connection."""
         key = f"{server.host}:{server.port}:{server.user}"
         async with self._pool_lock:
+            lock = self._pool_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._pool_locks[key] = lock
+        # Held per server, so a slow connect blocks only that server.
+        async with lock:
             conn = self._pool.get(key)
             if conn is not None:
                 # Check if connection is still alive
@@ -399,6 +409,29 @@ class MetricsCollector:
             self._pool[key] = conn
             return conn
 
+    def forget_server(self, server: ServerConfig) -> None:
+        """Drop per-server state when a server is removed or renamed.
+
+        Only _previous used to be cleared, so ping caches, error counts
+        and last-good snapshots accumulated for servers that no longer
+        exist, and a pooled connection stayed open — keepalives and all
+        — to a host the operator had already removed.
+        """
+        self._previous.pop(server.name, None)
+        self._ping_cache.pop(server.name, None)
+        self._ping_last_time.pop(server.name, None)
+        self._error_counts.pop(server.name, None)
+        self._last_good.pop(server.name, None)
+
+        key = f"{server.host}:{server.port}:{server.user}"
+        conn = self._pool.pop(key, None)
+        self._pool_locks.pop(key, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     async def close_pool(self) -> None:
         """Close all persistent SSH connections."""
         async with self._pool_lock:
@@ -409,6 +442,7 @@ class MetricsCollector:
                 except Exception:  # noqa: BLE001
                     pass
             self._pool.clear()
+            self._pool_locks.clear()
 
     async def _run_ssh_command(
         self,
@@ -2598,7 +2632,7 @@ async def delete_server(server_name: str) -> dict[str, Any]:
             )
 
         removed = cfg.servers.pop(index)
-        collector._previous.pop(removed.name, None)
+        collector.forget_server(removed)
 
         if removed.client_key:
             _cleanup_server_key(
@@ -2679,10 +2713,22 @@ async def rename_server(
                 f"Server '{new}' already exists",
             )
 
-        prev_sample = collector._previous.pop(old, None)
+        # Carry per-server state across the rename. Dropping it would
+        # restart CPU/network deltas and, because _notified_state is
+        # keyed by name, resend every alert already firing as if new.
+        for store in (
+            collector._previous,
+            collector._ping_cache,
+            collector._ping_last_time,
+            collector._error_counts,
+            collector._last_good,
+            _notified_state,
+            _trigger_counts,
+        ):
+            value = store.pop(old, None)
+            if value is not None:
+                store[new] = value
         srv.name = new
-        if prev_sample is not None:
-            collector._previous[new] = prev_sample
         save_config(cfg)
 
     return {"status": "ok", "old_name": old, "new_name": new}
