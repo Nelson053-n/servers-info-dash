@@ -13,6 +13,12 @@ HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-90}
 # Consecutive failed origin checks before alerting (5 min apart).
 STATE_FILE=${STATE_FILE:-/var/lib/dash-autodeploy/unreachable}
 UNREACHABLE_ALERT_AFTER=${UNREACHABLE_ALERT_AFTER:-12}
+# Refuse commits that are not signed by a trusted key. Enable only after
+# signing is set up and verified, or every deploy will be rejected.
+# ALLOWED_SIGNERS: space-separated key IDs/fingerprints; empty accepts
+# any signature git already trusts via its keyring.
+REQUIRE_SIGNED_COMMITS=${REQUIRE_SIGNED_COMMITS:-0}
+ALLOWED_SIGNERS=${ALLOWED_SIGNERS:-}
 
 log() { echo "$*"; }
 
@@ -173,6 +179,40 @@ if ! runuser -u "$APP_USER" -- git fetch origin main 2>&1; then
     log "fetch failed"
     notify $'⚠️ <b>Деплой не удался</b>\ngit fetch завершился с ошибкой'
     exit 1
+fi
+
+# The host runs whatever lands in main, unattended. Verifying the
+# signature is what stops a compromised GitHub account from being
+# arbitrary code execution here. Off by default so enabling it is a
+# deliberate step taken once commits are actually signed — switching it
+# on before that would simply stop all deploys.
+if [ "${REQUIRE_SIGNED_COMMITS:-0}" = "1" ]; then
+    if ! verify_out=$(runuser -u "$APP_USER" -- \
+        git verify-commit --raw "$remote_sha" 2>&1); then
+        log "signature check failed for ${remote_sha:0:8}"
+        log "$verify_out"
+        notify "🔒 <b>Деплой отклонён: подпись не прошла</b>
+Коммит <code>${remote_sha:0:8}</code> не подписан доверенным ключом.
+Остаёмся на <code>${local_sha:0:8}</code>."
+        exit 1
+    fi
+    # A valid signature is not enough: it must be a key we trust.
+    if [ -n "${ALLOWED_SIGNERS:-}" ]; then
+        signer_ok=0
+        for key in $ALLOWED_SIGNERS; do
+            case "$verify_out" in
+                *"$key"*) signer_ok=1; break ;;
+            esac
+        done
+        if [ "$signer_ok" != "1" ]; then
+            log "signature valid but signer not in allowlist"
+            notify "🔒 <b>Деплой отклонён: чужая подпись</b>
+Коммит <code>${remote_sha:0:8}</code> подписан ключом вне allowlist.
+Остаёмся на <code>${local_sha:0:8}</code>."
+            exit 1
+        fi
+    fi
+    log "signature verified for ${remote_sha:0:8}"
 fi
 runuser -u "$APP_USER" -- git reset --hard "$remote_sha" 2>&1 || {
     log "reset failed"

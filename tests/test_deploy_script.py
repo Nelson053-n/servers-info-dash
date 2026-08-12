@@ -22,6 +22,11 @@ case "$*" in
   *"git rev-parse"*)   echo "$LOCAL_SHA"; exit "${REVPARSE_FAIL:-0}" ;;
   *"git ls-remote"*)   printf '%s\\trefs/heads/main\\n' "$REMOTE_SHA"; exit 0 ;;
   *"git fetch"*)       exit "${FETCH_FAIL:-0}" ;;
+  *"verify-commit"*)
+      if [ -n "${SIGNATURE_BAD:-}" ]; then
+          echo "gpg: no signature found" >&2; exit 1
+      fi
+      echo "${SIGNER_KEY:-TRUSTEDKEY123} GOODSIG"; exit 0 ;;
   *"git reset"*)
       # ROLLBACK_RESET_FAIL fails only the reset back to LOCAL_SHA, so
       # the rollback path can be tested without aborting the forward one.
@@ -181,6 +186,57 @@ def test_fetch_failure_is_reported(deploy):
     assert proc.returncode == 1
     assert "fetch failed" in proc.stdout
     assert "systemctl: restart" not in calls, "restarted despite failed fetch"
+
+
+def test_signature_check_is_off_by_default(deploy):
+    """Enabling it before commits are signed would stop all deploys."""
+    proc, calls = deploy()
+
+    assert proc.returncode == 0, proc.stdout
+    assert "verify-commit" not in calls, "verified without being asked to"
+
+
+def test_unsigned_commit_is_refused_when_required(deploy):
+    """A compromised account must not get code onto the host."""
+    proc, calls = deploy(REQUIRE_SIGNED_COMMITS=1, SIGNATURE_BAD=1)
+
+    assert proc.returncode == 1
+    assert "signature check failed" in proc.stdout, proc.stdout
+    # Nothing may be applied or restarted on a rejected commit.
+    assert "git reset --hard 2222" not in calls, "applied an unsigned commit"
+    assert "systemctl: restart" not in calls
+
+
+def test_signed_commit_is_deployed(deploy):
+    proc, calls = deploy(REQUIRE_SIGNED_COMMITS=1)
+
+    assert proc.returncode == 0, proc.stdout
+    assert "signature verified" in proc.stdout
+    assert "systemctl: restart fake.service" in calls
+
+
+def test_signature_from_an_untrusted_key_is_refused(deploy):
+    """A valid signature by the wrong key is still the wrong key."""
+    proc, calls = deploy(
+        REQUIRE_SIGNED_COMMITS=1,
+        ALLOWED_SIGNERS="TRUSTEDKEY123",
+        SIGNER_KEY="ATTACKERKEY999",
+    )
+
+    assert proc.returncode == 1
+    assert "signer not in allowlist" in proc.stdout, proc.stdout
+    assert "systemctl: restart" not in calls
+
+
+def test_signature_from_an_allowed_key_is_deployed(deploy):
+    proc, calls = deploy(
+        REQUIRE_SIGNED_COMMITS=1,
+        ALLOWED_SIGNERS="OTHERKEY000 TRUSTEDKEY123",
+        SIGNER_KEY="TRUSTEDKEY123",
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert "systemctl: restart fake.service" in calls
 
 
 def test_unreachable_origin_skips_quietly(deploy):
