@@ -208,3 +208,60 @@ def test_index_has_no_inline_script():
     text = html.read_text(encoding="utf-8")
     assert "<script>" not in text
     assert 'src="/static/app.js' in text
+
+
+# ---- API tokens ----
+
+def _login(client):
+    assert client.post(
+        "/api/auth/login", json={"password": PASSWORD},
+    ).status_code == 200
+
+
+def test_token_gives_read_only_access_without_2fa(client, m, telegram):
+    # Mint through the API as the admin (session first, code second).
+    client.post("/api/auth/login", json={"password": PASSWORD})
+    client.post("/api/auth/verify", json={"code": _code_from(telegram[0])})
+    r = client.post(
+        "/api/auth/tokens",
+        json={"name": "neder32", "current_password": PASSWORD},
+    )
+    assert r.status_code == 201, r.text
+    token = r.json()["token"]
+    assert m._auth.api_tokens["neder32"]["hash"] != token, "stored in clear"
+
+    client.cookies.clear()
+    hdr = {"Authorization": f"Bearer {token}"}
+    assert client.get("/api/metrics", headers=hdr).status_code == 200
+    assert client.get("/api/auth/settings", headers=hdr).status_code == 200
+    r = client.put("/api/interval", json={"interval": 5}, headers=hdr)
+    assert r.status_code == 403, "token allowed a write"
+    assert client.get(
+        "/api/metrics", headers={"Authorization": "Bearer nope"},
+    ).status_code == 401
+
+
+def test_token_needs_password_and_unique_name(client, m):
+    _login(client)
+    r = client.post(
+        "/api/auth/tokens", json={"name": "a", "current_password": "bad"},
+    )
+    assert r.status_code == 403
+    assert client.post(
+        "/api/auth/tokens", json={"name": "a", "current_password": PASSWORD},
+    ).status_code == 201
+    assert client.post(
+        "/api/auth/tokens", json={"name": "a", "current_password": PASSWORD},
+    ).status_code == 409
+    assert client.post(
+        "/api/auth/tokens", json={"name": "a b", "current_password": PASSWORD},
+    ).status_code == 400
+    assert client.delete("/api/auth/tokens/a").status_code == 200
+    assert client.delete("/api/auth/tokens/a").status_code == 404
+    assert client.get("/api/auth/settings").json()["api_tokens"] == []
+
+
+def test_tokens_are_not_reachable_without_a_session(client):
+    assert client.post(
+        "/api/auth/tokens", json={"name": "x", "current_password": PASSWORD},
+    ).status_code == 401

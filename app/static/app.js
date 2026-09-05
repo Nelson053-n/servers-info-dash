@@ -103,6 +103,13 @@ const I = {
     sec_2fa: "Двухфакторный вход: код в Telegram",
     sec_2fa_need_bot: "Сначала настройте Telegram-бота (токен и chat ID)",
     sec_2fa_reset_hint: "Отключить без доступа: two_factor: false в config/auth.yaml",
+    sec_tokens_title: "API-токены (только чтение, без 2FA)",
+    sec_tokens_none: "нет",
+    sec_token_create: "Создать токен",
+    sec_token_revoke: "Отозвать",
+    sec_token_need_pw: "Введите текущий пароль в поле выше",
+    sec_token_shown_once: "Токен показан один раз, сохраните его. Заголовок: Authorization: Bearer …",
+    ph_sec_token_name: "Имя токена (например, neder32)",
   },
   en: {
     title: "Server Info Dashboard",
@@ -207,6 +214,13 @@ const I = {
     sec_2fa: "Two-factor login: code via Telegram",
     sec_2fa_need_bot: "Configure the Telegram bot first (token and chat ID)",
     sec_2fa_reset_hint: "Locked out? set two_factor: false in config/auth.yaml",
+    sec_tokens_title: "API tokens (read-only, no 2FA)",
+    sec_tokens_none: "none",
+    sec_token_create: "Create token",
+    sec_token_revoke: "Revoke",
+    sec_token_need_pw: "Enter the current password above",
+    sec_token_shown_once: "Shown once, store it now. Header: Authorization: Bearer …",
+    ph_sec_token_name: "Token name (e.g. neder32)",
   },
 };
 
@@ -256,6 +270,7 @@ function applyLang() {
     secNetworks: "ph_sec_nets",
     secSetupToken: "ph_sec_setup_token",
     loginCode: "ph_login_code",
+    secTokenName: "ph_sec_token_name",
   };
   $("loginBtn").textContent = t(awaitingCode ? "login_code_btn" : "login_btn");
   for (const [id, key] of Object.entries(ph)) {
@@ -1051,6 +1066,8 @@ toggleSec.addEventListener("click", async () => {
       tf.parentElement.title = tf.disabled && d.has_password ? t("sec_2fa_need_bot") : "";
       secMsg.textContent = d.has_password ? t("sec_pw_set") : t("sec_setup_hint");
       secMsg.className = d.has_password ? "msg ok" : "msg";
+      renderTokens(d.api_tokens || []);
+      $("secTokenOut").classList.add("hidden");
       // render history
       const hist = d.history || [];
       let h = '<table><thead><tr>' +
@@ -1076,6 +1093,65 @@ toggleSec.addEventListener("click", async () => {
       secMsg.textContent = t("error_prefix") + ": " + t("sec_load_failed");
       secMsg.className = "msg bad";
     }
+  }
+});
+
+/* API tokens: scripts poll /api/metrics with a bearer token instead of a
+   password, so turning 2FA on does not break them */
+function renderTokens(list) {
+  const box = $("secTokens");
+  let h = '<div style="font-weight:600;color:var(--text)">' + t("sec_tokens_title") + '</div>';
+  if (!list.length) h += '<div>' + t("sec_tokens_none") + '</div>';
+  for (const tk of list) {
+    h += '<div class="tok"><b>' + esc(tk.name) + '</b><span>' + esc(tk.created) + '</span>' +
+      '<button class="btn small" type="button" data-revoke="' + esc(tk.name) + '">' +
+      t("sec_token_revoke") + '</button></div>';
+  }
+  box.innerHTML = h;
+  box.querySelectorAll("button[data-revoke]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      try {
+        const r = await fetch("/api/auth/tokens/" + encodeURIComponent(btn.dataset.revoke),
+          {method: "DELETE"});
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "Error");
+        const s = await (await fetch("/api/auth/settings")).json();
+        renderTokens(s.api_tokens || []);
+      } catch(e) {
+        secMsg.textContent = t("error_prefix") + ": " + e.message;
+        secMsg.className = "msg bad";
+      }
+    });
+  });
+}
+
+$("secTokenCreate").addEventListener("click", async () => {
+  const name = $("secTokenName").value.trim();
+  const curPw = $("secCurrentPassword").value;
+  if (!name) return;
+  if (!curPw) {
+    secMsg.textContent = t("sec_token_need_pw");
+    secMsg.className = "msg bad";
+    return;
+  }
+  try {
+    const r = await fetch("/api/auth/tokens", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, current_password: curPw}),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Error");
+    const out = $("secTokenOut");
+    out.innerHTML = '<div>' + t("sec_token_shown_once") + '</div><code>' + esc(d.token) + '</code>';
+    out.classList.remove("hidden");
+    $("secTokenName").value = "";
+    secMsg.textContent = "";
+    const s = await (await fetch("/api/auth/settings")).json();
+    renderTokens(s.api_tokens || []);
+  } catch(e) {
+    secMsg.textContent = t("error_prefix") + ": " + e.message;
+    secMsg.className = "msg bad";
   }
 });
 

@@ -1260,6 +1260,7 @@ _RATE_LIMITED_PREFIXES = (
     "/api/interval",
     "/api/ssh_mode",
     "/api/auth/settings",
+    "/api/auth/tokens",
 )
 
 
@@ -1306,6 +1307,37 @@ class _AuthState:
         default_factory=list,
     )
     two_factor: bool = False
+    # name -> {"hash": sha256 hex, "created": iso}. Read-only bearer
+    # tokens for scripts that poll /api/metrics and cannot answer a
+    # Telegram code; the plaintext is shown once at creation.
+    api_tokens: dict[str, dict[str, str]] = dc_field(
+        default_factory=dict,
+    )
+
+
+_API_TOKEN_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+_MAX_API_TOKENS = 20
+
+
+def _hash_api_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _bearer_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    scheme, _, value = auth.partition(" ")
+    if scheme.lower() != "bearer" or not value.strip():
+        return None
+    return value.strip()
+
+
+def _match_api_token(token: str) -> str | None:
+    """Return the token's name, or None. Constant-time per entry."""
+    digest = _hash_api_token(token)
+    for name, entry in _auth.api_tokens.items():
+        if hmac.compare_digest(digest, entry.get("hash", "")):
+            return name
+    return None
 
 
 def _session_age_ok(created: str | None) -> bool:
@@ -1371,6 +1403,7 @@ def _load_auth() -> _AuthState:
         blocked_until=raw.get("blocked_until", {}),
         history=raw.get("history", []),
         two_factor=bool(raw.get("two_factor", False)),
+        api_tokens=raw.get("api_tokens", {}) or {},
     )
     _prune_sessions(state)
     return state
@@ -1389,6 +1422,7 @@ def _save_auth(state: _AuthState) -> None:
             -_MAX_HISTORY:
         ],
         "two_factor": state.two_factor,
+        "api_tokens": state.api_tokens,
     }
     # Session tokens and the password hash are stored in the clear, so
     # the file must never be world-readable. Set the mode before writing
@@ -1708,6 +1742,21 @@ async def auth_middleware(
         return JSONResponse(
             {"detail": "Forbidden"}, status_code=403,
         )
+    # API token: scripted read access, no cookie, no second factor.
+    bearer = _bearer_token(request)
+    if bearer is not None:
+        if request.method not in ("GET", "HEAD"):
+            return JSONResponse(
+                {"detail": "API tokens are read-only"}, status_code=403,
+            )
+        if _match_api_token(bearer) is None:
+            # 256-bit tokens are not guessable, but a stream of bad ones
+            # should still cost the sender its login budget.
+            _login_limiter.is_limited(_limiter_key(ip))
+            return JSONResponse(
+                {"detail": "Invalid API token"}, status_code=401,
+            )
+        return await call_next(request)
     # check session cookie
     sid = request.cookies.get(_SESSION_COOKIE)
     if not sid or sid not in _auth.sessions:
@@ -2758,7 +2807,63 @@ async def get_auth_settings() -> dict[str, Any]:
         "history": _auth.history[-_MAX_HISTORY:],
         "two_factor": _auth.two_factor,
         "bot_ready": _bot_ready(),
+        "api_tokens": [
+            {"name": name, "created": entry.get("created", "")}
+            for name, entry in _auth.api_tokens.items()
+        ],
     }
+
+
+class _CreateTokenRequest(BaseModel):
+    name: str = Field(max_length=40)
+    current_password: str = Field(max_length=200)
+
+
+@app.post("/api/auth/tokens", status_code=201)
+async def create_api_token(
+    payload: _CreateTokenRequest,
+) -> dict[str, str]:
+    """Mint a read-only bearer token; the plaintext is returned once."""
+    name = payload.name.strip()
+    if not _API_TOKEN_NAME_RE.fullmatch(name):
+        raise HTTPException(
+            status_code=400,
+            detail="Token name: letters, digits, . _ - (max 40)",
+        )
+    ok = await asyncio.get_running_loop().run_in_executor(
+        None, _verify_password, payload.current_password, _auth.password_hash,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=403, detail="Current password is incorrect",
+        )
+    token = secrets.token_urlsafe(32)
+    with _AUTH_LOCK:
+        if name in _auth.api_tokens:
+            raise HTTPException(
+                status_code=409, detail="A token with this name exists",
+            )
+        if len(_auth.api_tokens) >= _MAX_API_TOKENS:
+            raise HTTPException(
+                status_code=400, detail="Too many tokens, revoke one first",
+            )
+        _auth.api_tokens[name] = {
+            "hash": _hash_api_token(token),
+            "created": dt.datetime.now(dt.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M",
+            ),
+        }
+        _save_auth(_auth)
+    return {"name": name, "token": token}
+
+
+@app.delete("/api/auth/tokens/{name}")
+async def revoke_api_token(name: str) -> dict[str, str]:
+    with _AUTH_LOCK:
+        if _auth.api_tokens.pop(name, None) is None:
+            raise HTTPException(status_code=404, detail="No such token")
+        _save_auth(_auth)
+    return {"status": "ok"}
 
 
 @app.put("/api/auth/settings")

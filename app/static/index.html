@@ -150,6 +150,11 @@ tr:last-child td{border-bottom:none}
 .login-box .login-err{color:var(--bad);font-size:13px;min-height:18px}
 .login-box .login-hint{color:var(--muted);font-size:13px;margin-bottom:6px}
 .sec-form label.check{display:flex;align-items:center;gap:8px;font-size:13px}
+.sec-tokens{font-size:13px;color:var(--muted)}
+.sec-tokens .tok{display:flex;align-items:center;gap:8px;padding:2px 0}
+.sec-tokens .tok b{color:var(--text)}
+.sec-token-out{font-size:13px;word-break:break-all}
+.sec-token-out code{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;user-select:all}
 /* security form */
 .sec-form{display:grid;grid-template-columns:repeat(2,1fr);
   gap:10px;margin-bottom:14px}
@@ -271,6 +276,10 @@ tr:last-child td{border-bottom:none}
     <input id="secNetworks" class="full"/>
     <label class="full check"><input type="checkbox" id="secTwoFactor"/>
       <span data-i="sec_2fa"></span></label>
+    <div class="full sec-tokens" id="secTokens"></div>
+    <input id="secTokenName" maxlength="40"/>
+    <button class="btn" id="secTokenCreate" type="button" data-i="sec_token_create"></button>
+    <div class="full sec-token-out hidden" id="secTokenOut"></div>
     <div style="display:flex;gap:8px;grid-column:1/-1">
       <button class="btn accent" id="secSave" type="button"
         data-i="sec_save"></button>
@@ -326,6 +335,6 @@ tr:last-child td{border-bottom:none}
   </div>
 </div>
 
-<script src="/static/app.js?v=20260905"></script>
+<script src="/static/app.js?v=20260905b"></script>
 </body>
 </html>
