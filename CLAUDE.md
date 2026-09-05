@@ -29,13 +29,13 @@ python -c "import yaml; from pathlib import Path; d=yaml.safe_load(Path('config/
 
 - **Pydantic models** (top): `AppConfig`, `ServerConfig`, `BotConfig`, `SSHSettings`, request/response models
 - **`MetricsCollector` class**: core engine — collects metrics from all servers in parallel via `asyncio.gather`. Remote data fetched with a single SSH command per server per cycle (reads `/proc/stat`, `/proc/meminfo`, `/proc/net/dev`, `/proc/uptime`, `df`). CPU/network rates are delta-based (needs two samples). Supports normal (ephemeral connections) and persistent (pooled with keepalive) SSH modes via `asyncssh`
-- **Auth system** (`_AuthState`, `_RateLimiter`): PBKDF2-SHA256 passwords, IP-bound sessions stored in `config/auth.yaml`, brute-force protection, CIDR whitelist, CSRF origin checking. Two middleware: `security_headers_middleware` and `auth_middleware`
+- **Auth system** (`_AuthState`, `_RateLimiter`): PBKDF2-SHA256 passwords, IP-bound sessions stored in `config/auth.yaml` (pruned: 30 days, max 10 per IP), per-IP and global login limiters, CIDR whitelist, CSRF origin checking. Optional second factor (`two_factor` in auth.yaml): `/api/auth/login` returns `2fa_required` and sends a 6-digit code to the Telegram bot chat; `/api/auth/verify` exchanges it for the session cookie. Two middleware: `auth_middleware` (inner) and `security_headers_middleware` (outer, adds CSP — no inline scripts allowed)
 - **Bootstrap flow** (`_bootstrap_monitor_user`): creates hardened `monitor` user on remote host via root SSH, installs ed25519 key with SSH restrictions
 - **Telegram notifications** (`_check_and_notify`): threshold-based alerts with configurable delay (consecutive cycles), recovery messages
 - **CSV logging**: per-server daily files in `logs/`, 30-day rotation, used for traffic volume calculations
 - **Background collector** (`_background_collector`): runs in a loop at `refresh_interval_sec`, triggers metrics collection, logging, and notifications
 
-**Single-file frontend** (`app/static/index.html`) — vanilla JS SPA, no build step. Dark/light themes, RU/EN i18n, sortable table.
+**Frontend** (`app/static/index.html` markup + `app/static/app.js` logic) — vanilla JS SPA, no build step. The script is a separate file because CSP forbids inline script; bump `?v=` in the script tag when changing it. Dark/light themes, RU/EN i18n, sortable table.
 
 ## Config Files
 

@@ -15,17 +15,27 @@ STATE_FILE=${STATE_FILE:-/var/lib/dash-autodeploy/unreachable}
 UNREACHABLE_ALERT_AFTER=${UNREACHABLE_ALERT_AFTER:-12}
 # Refuse commits that are not signed by a trusted key. Enable only after
 # signing is set up and verified, or every deploy will be rejected.
-# ALLOWED_SIGNERS: space-separated key IDs/fingerprints; empty accepts
-# any signature git already trusts via its keyring.
+# Production sets these in /etc/default/dash-autodeploy (EnvironmentFile
+# of the unit). With SSH signatures the trusted keys are the ones in
+# gpg.ssh.allowedSignersFile of the APP_USER checkout; ALLOWED_SIGNERS
+# additionally pins the key fingerprint(s) reported by verify-commit
+# ("SHA256:..."), space-separated. Empty accepts any key in that file.
 REQUIRE_SIGNED_COMMITS=${REQUIRE_SIGNED_COMMITS:-0}
 ALLOWED_SIGNERS=${ALLOWED_SIGNERS:-}
 
 log() { echo "$*"; }
 
 notify() {
-    # Telegram alert on failures only; credentials stay in the app config
+    # Telegram alert on failures only; credentials stay in the app config.
+    # Runs as APP_USER: the venv belongs to that user, so executing its
+    # interpreter as root would let anyone who owns the venv become root.
     local text="$1"
-    APP_DIR="$APP_DIR" "$APP_DIR/.venv/bin/python" - "$text" <<'PY' 2>/dev/null \
+    if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
+        log "notify failed (Telegram unreachable or config unreadable)"
+        return
+    fi
+    runuser -u "$APP_USER" -- env APP_DIR="$APP_DIR" \
+        "$APP_DIR/.venv/bin/python" - "$text" <<'PY' 2>/dev/null \
         || log "notify failed (Telegram unreachable or config unreadable)"
 import os, sys, urllib.parse, urllib.request
 from pathlib import Path

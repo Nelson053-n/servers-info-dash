@@ -5,5 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# REQUIRE_SIGNED_COMMITS / ALLOWED_SIGNERS live here, outside the repo
+# the script deploys.
+EnvironmentFile=-/etc/default/dash-autodeploy
 ExecStart=/usr/local/bin/dash-autodeploy.sh
 TimeoutStartSec=600

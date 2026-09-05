@@ -31,7 +31,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger("serverinfo")
 
@@ -82,9 +82,34 @@ class AppConfig(BaseModel):
     bot: BotConfig = Field(default_factory=BotConfig)
 
 
+_HOSTNAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})")
+
+
+def _validate_host(value: str) -> str:
+    """Accept an IP address or a DNS name, nothing that looks like an option.
+
+    The host goes straight into ping and ssh-keyscan argv; a value
+    starting with '-' would be parsed as a flag there.
+    """
+    value = value.strip()
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        pass
+    if not _HOSTNAME_RE.fullmatch(value):
+        raise ValueError("host must be an IP address or a hostname")
+    return value
+
+
 class AddServerRequest(BaseModel):
     name: str = Field(max_length=100)
     host: str = Field(max_length=255)
+
+    @field_validator("host")
+    @classmethod
+    def _check_host(cls, value: str) -> str:
+        return _validate_host(value)
     port: int = Field(default=22, ge=1, le=65535)
     user: str = Field(max_length=32)
     interface: str | None = Field(default=None, max_length=50)
@@ -104,6 +129,13 @@ class PreviousSample:
     rx_bytes: int
     tx_bytes: int
     at: float
+
+
+# Upper bound on one server's snapshot; the real one is ~2 KB.
+_MAX_REMOTE_OUTPUT_CHARS = 64 * 1024
+# Linux IFNAMSIZ is 16 including NUL; names like eth0, ens3, wg0,
+# veth1@if5, eth0.100 all fit this.
+_IFACE_RE = re.compile(r"[\w.@-]{1,15}")
 
 
 class MetricsCollector:
@@ -546,11 +578,18 @@ class MetricsCollector:
     def _normalize_output(output: Any) -> str:
         if output is None:
             raise RuntimeError("Empty command output")
-        if isinstance(output, str):
-            return output
         if isinstance(output, (bytes, bytearray)):
-            return output.decode(errors="ignore")
-        return str(output)
+            output = output.decode(errors="ignore")
+        elif not isinstance(output, str):
+            output = str(output)
+        # The snapshot is a few KB. A compromised host could answer
+        # with hundreds of MB inside command_timeout; the parsers run
+        # on the event loop, so this bounds what they ever see.
+        if len(output) > _MAX_REMOTE_OUTPUT_CHARS:
+            raise RuntimeError(
+                f"Command output too large ({len(output)} chars)",
+            )
+        return output
 
     @staticmethod
     def _parse_cpu_line(output: str) -> tuple[int, int]:
@@ -586,6 +625,10 @@ class MetricsCollector:
                 continue
             iface_raw, counters_raw = line.split(":", maxsplit=1)
             iface = iface_raw.strip()
+            # The name is stored in CSV and shown in the UI verbatim;
+            # anything the kernel would not accept is not an interface.
+            if not _IFACE_RE.fullmatch(iface):
+                continue
             counters = counters_raw.split()
             if len(counters) < 16:
                 continue
@@ -757,7 +800,24 @@ def save_config(updated_cfg: AppConfig) -> None:
         sort_keys=False,
         allow_unicode=True,
     )
-    CONFIG_PATH.write_text(dumped, encoding="utf-8")
+    # The bot token lives in here: create at 0600 and rename into
+    # place, the same way auth.yaml is written.
+    tmp_path = CONFIG_PATH.with_name(f".{CONFIG_PATH.name}.tmp")
+    fd = os.open(
+        tmp_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(dumped)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, CONFIG_PATH)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    CONFIG_PATH.chmod(0o600)
 
 
 def _validate_unix_username(username: str, field_name: str) -> None:
@@ -1184,6 +1244,16 @@ _login_limiter = _RateLimiter(
     window_sec=_LOGIN_WINDOW_SEC,
 )
 
+# The per-IP limiter is trivially spread across many addresses, and a
+# login costs a PBKDF2 round: one shared budget bounds the total CPU an
+# unauthenticated crowd can burn.
+_LOGIN_GLOBAL_MAX_PER_MINUTE = 60
+_login_global_limiter = _RateLimiter(
+    max_requests=_LOGIN_GLOBAL_MAX_PER_MINUTE,
+    window_sec=60,
+)
+_GLOBAL_KEY = "*"
+
 _RATE_LIMITED_PREFIXES = (
     "/api/servers",
     "/api/bot",
@@ -1201,8 +1271,15 @@ _BLOCK_MINUTES = 30
 _SESSION_COOKIE = "sid"
 _MAX_HISTORY = 20
 _SESSION_MAX_AGE_DAYS = 30
+# A client that logs in on every poll without keeping its cookie would
+# otherwise accumulate a session per request, forever.
+_MAX_SESSIONS_PER_IP = 10
 _PBKDF2_ITERATIONS = 600_000
 _MIN_PASSWORD_LENGTH = 8
+# Second factor: a one-time code sent to the configured Telegram chat.
+_PENDING_COOKIE = "sid_pending"
+_2FA_CODE_TTL_SEC = 300
+_2FA_CODE_DIGITS = 6
 # One-time token gating first-run setup; None once a password exists.
 _setup_token: str | None = None
 
@@ -1228,6 +1305,42 @@ class _AuthState:
     history: list[dict[str, str]] = dc_field(
         default_factory=list,
     )
+    two_factor: bool = False
+
+
+def _session_age_ok(created: str | None) -> bool:
+    if not created:
+        return False  # no timestamp = legacy, treat as expired
+    try:
+        ts = dt.datetime.fromisoformat(created)
+    except ValueError:
+        return False
+    age = dt.datetime.now(dt.timezone.utc) - ts
+    return age.days <= _SESSION_MAX_AGE_DAYS
+
+
+def _prune_sessions(state: _AuthState) -> None:
+    """Drop expired sessions and cap how many one address may hold.
+
+    Expiry used to be checked only when a token was presented, so a
+    session that was never used again lived in auth.yaml indefinitely.
+    Caller holds _AUTH_LOCK (or owns the state).
+    """
+    for tok in list(state.sessions):
+        if not _session_age_ok(state.session_created.get(tok)):
+            state.sessions.pop(tok, None)
+            state.session_created.pop(tok, None)
+    by_ip: dict[str, list[str]] = {}
+    for tok, ip in state.sessions.items():
+        by_ip.setdefault(ip, []).append(tok)
+    for toks in by_ip.values():
+        excess = len(toks) - _MAX_SESSIONS_PER_IP
+        if excess <= 0:
+            continue
+        toks.sort(key=lambda t: state.session_created.get(t, ""))
+        for tok in toks[:excess]:
+            state.sessions.pop(tok, None)
+            state.session_created.pop(tok, None)
 
 
 def _load_auth() -> _AuthState:
@@ -1247,7 +1360,7 @@ def _load_auth() -> _AuthState:
             f"{_AUTH_PATH} is corrupted: no password_hash. Refusing to "
             f"start unauthenticated. Restore it or delete it to start over."
         )
-    return _AuthState(
+    state = _AuthState(
         password_hash=raw.get("password_hash", ""),
         allowed_networks=raw.get(
             "allowed_networks", [],
@@ -1257,7 +1370,10 @@ def _load_auth() -> _AuthState:
         fail_counts=raw.get("fail_counts", {}),
         blocked_until=raw.get("blocked_until", {}),
         history=raw.get("history", []),
+        two_factor=bool(raw.get("two_factor", False)),
     )
+    _prune_sessions(state)
+    return state
 
 
 def _save_auth(state: _AuthState) -> None:
@@ -1272,6 +1388,7 @@ def _save_auth(state: _AuthState) -> None:
         "history": state.history[
             -_MAX_HISTORY:
         ],
+        "two_factor": state.two_factor,
     }
     # Session tokens and the password hash are stored in the clear, so
     # the file must never be world-readable. Set the mode before writing
@@ -1491,6 +1608,7 @@ _auth = _load_auth()
 
 _PUBLIC_PATHS = {
     "/api/auth/login",
+    "/api/auth/verify",
     "/api/auth/status",
     "/api/health",
 }
@@ -1506,15 +1624,17 @@ _SETUP_PATHS = {
 
 def _session_expired(token: str) -> bool:
     """Check if session has exceeded max age."""
-    created = _auth.session_created.get(token)
-    if not created:
-        return True  # no timestamp = legacy, treat as expired
-    try:
-        ts = dt.datetime.fromisoformat(created)
-        age = dt.datetime.now(dt.timezone.utc) - ts
-        return age.days > _SESSION_MAX_AGE_DAYS
-    except ValueError:
-        return True
+    return not _session_age_ok(_auth.session_created.get(token))
+
+
+def _cookie_secure(request: Request) -> bool:
+    """Mark cookies Secure whenever the client actually used TLS.
+
+    Behind nginx the scheme comes from X-Forwarded-Proto via uvicorn's
+    proxy handling. HSTS does not help here: browsers ignore it for a
+    bare IP address, and the dashboard is reached by one.
+    """
+    return request.url.scheme == "https"
 
 
 def _check_csrf(request: Request) -> bool:
@@ -1533,23 +1653,6 @@ def _check_csrf(request: Request) -> bool:
     except IndexError:
         return False
     return origin_host == host
-
-
-@app.middleware("http")
-async def security_headers_middleware(
-    request: Request,
-    call_next: Any,
-) -> Response:
-    """Add security headers to all responses."""
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Permissions-Policy"] = (
-        "camera=(), microphone=(), geolocation=()"
-    )
-    return response
 
 
 @app.middleware("http")
@@ -1638,6 +1741,43 @@ async def auth_middleware(
             status_code=401,
         )
     return await call_next(request)
+
+
+# The script lives in its own file so the policy can forbid inline
+# script entirely; inline styles remain (style="" in generated rows).
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'; "
+    "form-action 'self'"
+)
+
+
+# Registered after auth_middleware, which makes it the outer layer:
+# the login page and the 401/403/429 short-circuits above get the
+# headers too, instead of only responses that reached a route.
+@app.middleware("http")
+async def security_headers_middleware(
+    request: Request,
+    call_next: Any,
+) -> Response:
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # The legacy auditor is removed from browsers and could be abused
+    # for cross-site leaks; CSP is the replacement.
+    response.headers["X-XSS-Protection"] = "0"
+    response.headers["Content-Security-Policy"] = _CSP
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=()"
+    )
+    return response
 
 
 # ---- server metrics log ----
@@ -2021,8 +2161,8 @@ _notified_state: dict[str, set[str]] = {}
 _trigger_counts: dict[str, dict[str, int]] = {}
 
 
-def _send_telegram(token: str, chat_id: str, text: str) -> None:
-    """Send a message via Telegram Bot API (sync)."""
+def _send_telegram(token: str, chat_id: str, text: str) -> bool:
+    """Send a message via Telegram Bot API (sync). True on success."""
     url = (
         f"https://api.telegram.org/bot{token}"
         f"/sendMessage"
@@ -2041,6 +2181,8 @@ def _send_telegram(token: str, chat_id: str, text: str) -> None:
             pass
     except Exception as exc:  # noqa: BLE001
         logger.warning("Telegram send failed: %s", exc)
+        return False
+    return True
 
 
 async def _check_and_notify(
@@ -2325,11 +2467,147 @@ class _LoginRequest(BaseModel):
     password: str = Field(max_length=200)
 
 
+class _VerifyRequest(BaseModel):
+    code: str = Field(max_length=16)
+
+
 class _SecuritySettingsRequest(BaseModel):
     current_password: str | None = None
     password: str | None = None
     allowed_networks: list[str] = []
     setup_token: str | None = None  # first run only
+    two_factor: bool | None = None  # None = leave unchanged
+
+
+# Half-open logins: password accepted, Telegram code not yet entered.
+# In memory only — a restart simply asks for the password again.
+_pending_2fa: dict[str, dict[str, Any]] = {}
+
+
+def _bot_ready() -> bool:
+    return bool(cfg.bot.token and cfg.bot.chat_id)
+
+
+def _prune_pending(now_ts: float) -> None:
+    for tok, entry in list(_pending_2fa.items()):
+        if now_ts - entry["created"] > _2FA_CODE_TTL_SEC:
+            _pending_2fa.pop(tok, None)
+
+
+def _login_throttled(ip_key: str) -> JSONResponse | None:
+    """Shared gate for both login steps: limiters, then the IP block."""
+    if (
+        _login_limiter.is_limited(ip_key)
+        or _login_global_limiter.is_limited(_GLOBAL_KEY)
+    ):
+        return JSONResponse(
+            {"detail": "Too many login attempts"},
+            status_code=429,
+        )
+    blocked_ts = _auth.blocked_until.get(ip_key)
+    if blocked_ts:
+        now = dt.datetime.now(dt.timezone.utc)
+        try:
+            until = dt.datetime.fromisoformat(blocked_ts)
+            if now < until:
+                diff = int((until - now).total_seconds())
+                return JSONResponse(
+                    {"detail": f"Blocked for {diff}s"},
+                    status_code=429,
+                )
+        except ValueError:
+            pass
+        with _AUTH_LOCK:
+            _auth.blocked_until.pop(ip_key, None)
+            _auth.fail_counts.pop(ip_key, None)
+            _save_auth(_auth)
+    return None
+
+
+def _failure_response(ip_key: str, what: str) -> JSONResponse:
+    remaining = _record_login_failure(ip_key)
+    if remaining <= 0:
+        return JSONResponse(
+            {"detail": f"Blocked for {_BLOCK_MINUTES} min"},
+            status_code=429,
+        )
+    return JSONResponse(
+        {"detail": what, "remaining": remaining},
+        status_code=403,
+    )
+
+
+async def _issue_session(
+    request: Request, ip: str, ip_key: str,
+) -> JSONResponse:
+    """Both factors passed: record the login and set the cookie."""
+    now = dt.datetime.now(dt.timezone.utc)
+    token = secrets.token_urlsafe(32)
+    ua = request.headers.get("user-agent", "")
+    # Country is decoration for the login history; a third-party lookup
+    # being down must not stop anyone signing in.
+    try:
+        country = await asyncio.get_running_loop(
+        ).run_in_executor(None, _geo_lookup, ip)
+    except Exception:  # noqa: BLE001
+        logger.warning("geo lookup failed for %s", ip, exc_info=True)
+        country = ""
+    with _AUTH_LOCK:
+        _prune_sessions(_auth)
+        _auth.sessions[token] = ip
+        _auth.session_created[token] = (
+            now.isoformat()
+        )
+        # Keyed like the failure path, or a success would never clear
+        # the block it was counted against.
+        _auth.fail_counts.pop(ip_key, None)
+        _auth.blocked_until.pop(ip_key, None)
+        _auth.history.append(
+            {
+                "time": now.strftime(
+                    "%Y-%m-%d %H:%M",
+                ),
+                "ip": ip,
+                "country": country,
+                "ua": ua[:200],
+            },
+        )
+        if len(_auth.history) > _MAX_HISTORY:
+            _auth.history = _auth.history[
+                -_MAX_HISTORY:
+            ]
+        _prune_sessions(_auth)
+        _save_auth(_auth)
+
+    resp = JSONResponse({"status": "ok"})
+    resp.set_cookie(
+        _SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=_cookie_secure(request),
+        samesite="lax",
+        max_age=_SESSION_MAX_AGE_DAYS * 86400,
+    )
+    resp.delete_cookie(_PENDING_COOKIE)
+    return resp
+
+
+async def _send_2fa_code(ip: str) -> str | None:
+    """Mail a fresh code to Telegram; returns the code, or None if unsent."""
+    code = str(
+        secrets.randbelow(10 ** _2FA_CODE_DIGITS),
+    ).zfill(_2FA_CODE_DIGITS)
+    text = (
+        "🔐 <b>Код входа в дашборд</b>\n"
+        f"<code>{code}</code>\n"
+        f"IP: {ip}\n"
+        f"Действует {_2FA_CODE_TTL_SEC // 60} минут. "
+        "Если это не вы — смените пароль."
+    )
+    sent = await asyncio.get_running_loop().run_in_executor(
+        None, _send_telegram, cfg.bot.token, cfg.bot.chat_id, text,
+    )
+    return code if sent else None
 
 
 @app.get("/api/auth/status")
@@ -2359,36 +2637,12 @@ async def auth_login(
     # Both the limiter and the failure counter key on the prefix, so an
     # IPv6 client cannot dodge either by walking its own /64.
     ip_key = _limiter_key(ip)
-    now = dt.datetime.now(dt.timezone.utc)
     # Rate limit before touching the password: the per-IP failure counter
     # below resets on block expiry, which on its own allows sustained
     # guessing.
-    if _login_limiter.is_limited(ip_key):
-        return JSONResponse(
-            {"detail": "Too many login attempts"},
-            status_code=429,
-        )
-    # check block
-    blocked_ts = _auth.blocked_until.get(ip_key)
-    if blocked_ts:
-        try:
-            until = dt.datetime.fromisoformat(blocked_ts)
-            if now < until:
-                diff = int((until - now).total_seconds())
-                return JSONResponse(
-                    {
-                        "detail": (
-                            f"Blocked for {diff}s"
-                        ),
-                    },
-                    status_code=429,
-                )
-        except ValueError:
-            pass
-        with _AUTH_LOCK:
-            _auth.blocked_until.pop(ip_key, None)
-            _auth.fail_counts.pop(ip_key, None)
-            _save_auth(_auth)
+    throttled = _login_throttled(ip_key)
+    if throttled is not None:
+        return throttled
 
     if not _auth.password_hash:
         return JSONResponse(
@@ -2396,73 +2650,78 @@ async def auth_login(
             status_code=400,
         )
 
-    if not _verify_password(
-        payload.password, _auth.password_hash,
-    ):
-        remaining = _record_login_failure(ip_key)
-        if remaining <= 0:
-            return JSONResponse(
-                {
-                    "detail": (
-                        "Blocked for "
-                        f"{_BLOCK_MINUTES} min"
-                    ),
-                },
-                status_code=429,
-            )
+    # PBKDF2 takes a good fraction of a second; off the loop so a burst
+    # of bad passwords does not stall the collector and everyone else.
+    ok = await asyncio.get_running_loop().run_in_executor(
+        None, _verify_password, payload.password, _auth.password_hash,
+    )
+    if not ok:
+        return _failure_response(ip_key, "Wrong password")
+
+    if not (_auth.two_factor and _bot_ready()):
+        return await _issue_session(request, ip, ip_key)
+
+    # Second factor: hand out a code and a short-lived pending cookie.
+    now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
+    _prune_pending(now_ts)
+    code = await _send_2fa_code(ip)
+    if code is None:
         return JSONResponse(
-            {
-                "detail": "Wrong password",
-                "remaining": remaining,
-            },
-            status_code=403,
+            {"detail": "Could not send the code via Telegram"},
+            status_code=503,
         )
-
-    # success
-    token = secrets.token_urlsafe(32)
-    ua = request.headers.get("user-agent", "")
-    # Country is decoration for the login history; a third-party lookup
-    # being down must not stop anyone signing in.
-    try:
-        country = await asyncio.get_running_loop(
-        ).run_in_executor(None, _geo_lookup, ip)
-    except Exception:  # noqa: BLE001
-        logger.warning("geo lookup failed for %s", ip, exc_info=True)
-        country = ""
-    with _AUTH_LOCK:
-        _auth.sessions[token] = ip
-        _auth.session_created[token] = (
-            now.isoformat()
-        )
-        # Keyed like the failure path, or a success would never clear
-        # the block it was counted against.
-        _auth.fail_counts.pop(ip_key, None)
-        _auth.blocked_until.pop(ip_key, None)
-        _auth.history.append(
-            {
-                "time": now.strftime(
-                    "%Y-%m-%d %H:%M",
-                ),
-                "ip": ip,
-                "country": country,
-                "ua": ua[:200],
-            },
-        )
-        if len(_auth.history) > _MAX_HISTORY:
-            _auth.history = _auth.history[
-                -_MAX_HISTORY:
-            ]
-        _save_auth(_auth)
-
-    resp = JSONResponse({"status": "ok"})
+    pending = secrets.token_urlsafe(32)
+    _pending_2fa[pending] = {
+        "code": code, "ip": ip, "created": now_ts,
+    }
+    resp = JSONResponse({"status": "2fa_required"})
     resp.set_cookie(
-        _SESSION_COOKIE,
-        token,
+        _PENDING_COOKIE,
+        pending,
         httponly=True,
+        secure=_cookie_secure(request),
         samesite="lax",
-        max_age=_SESSION_MAX_AGE_DAYS * 86400,
+        max_age=_2FA_CODE_TTL_SEC,
     )
     return resp
+
+
+@app.post("/api/auth/verify")
+async def auth_verify(
+    payload: _VerifyRequest,
+    request: Request,
+) -> JSONResponse:
+    ip = _client_ip(request)
+    ip_key = _limiter_key(ip)
+    throttled = _login_throttled(ip_key)
+    if throttled is not None:
+        return throttled
+
+    now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
+    _prune_pending(now_ts)
+    pending = request.cookies.get(_PENDING_COOKIE)
+    entry = _pending_2fa.get(pending) if pending else None
+    if entry is None or entry["ip"] != ip:
+        resp = JSONResponse(
+            {"detail": "Login expired, start again"},
+            status_code=401,
+        )
+        resp.delete_cookie(_PENDING_COOKIE)
+        return resp
+
+    if not hmac.compare_digest(
+        payload.code.strip(), entry["code"],
+    ):
+        # A wrong code counts like a wrong password: five of them block
+        # the address, and the block ends this pending login too.
+        resp = _failure_response(ip_key, "Wrong code")
+        if resp.status_code == 429:
+            _pending_2fa.pop(pending, None)
+            resp.delete_cookie(_PENDING_COOKIE)
+        return resp
+
+    _pending_2fa.pop(pending, None)
+    return await _issue_session(request, ip, ip_key)
 
 
 @app.post("/api/auth/logout")
@@ -2490,11 +2749,15 @@ async def get_auth_settings() -> dict[str, Any]:
             "has_password": False,
             "allowed_networks": [],
             "history": [],
+            "two_factor": False,
+            "bot_ready": False,
         }
     return {
         "has_password": True,
         "allowed_networks": _auth.allowed_networks,
         "history": _auth.history[-_MAX_HISTORY:],
+        "two_factor": _auth.two_factor,
+        "bot_ready": _bot_ready(),
     }
 
 
@@ -2516,35 +2779,67 @@ async def update_auth_settings(
                 "journalctl -u servers-info-dash"
             ),
         )
+    if payload.password and len(payload.password) < _MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Password must be at least "
+                f"{_MIN_PASSWORD_LENGTH} characters"
+            ),
+        )
+    # Changing the password or the second factor re-proves the current
+    # password. Verified before taking the lock: PBKDF2 runs in a
+    # thread, and awaiting while holding _AUTH_LOCK would freeze the
+    # loop for anyone else who needs it meanwhile.
+    two_factor_change = (
+        payload.two_factor is not None
+        and payload.two_factor != _auth.two_factor
+    )
+    if _auth.password_hash and (payload.password or two_factor_change):
+        current_ok = bool(payload.current_password) and (
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                _verify_password,
+                payload.current_password or "",
+                _auth.password_hash,
+            )
+        )
+        if not current_ok:
+            raise HTTPException(
+                status_code=403,
+                detail="Current password is incorrect",
+            )
+    if two_factor_change and payload.two_factor:
+        if not _bot_ready():
+            raise HTTPException(
+                status_code=400,
+                detail="Configure the Telegram bot (token and chat) first",
+            )
+        # Prove the chat is reachable now, or the next login would be
+        # the moment to find out that it is not.
+        sent = await asyncio.get_running_loop().run_in_executor(
+            None,
+            _send_telegram,
+            cfg.bot.token,
+            cfg.bot.chat_id,
+            "🔐 Двухфакторный вход в дашборд включён. "
+            "Коды подтверждения будут приходить в этот чат.",
+        )
+        if not sent:
+            raise HTTPException(
+                status_code=502,
+                detail="Telegram did not accept the test message",
+            )
     with _AUTH_LOCK:
         if payload.password:
-            if len(payload.password) < _MIN_PASSWORD_LENGTH:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Password must be at least "
-                        f"{_MIN_PASSWORD_LENGTH} characters"
-                    ),
-                )
-            # require current password when changing
-            if _auth.password_hash:
-                if (
-                    not payload.current_password
-                    or not _verify_password(
-                        payload.current_password,
-                        _auth.password_hash,
-                    )
-                ):
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Current password is incorrect",
-                    )
             # First run needs no current password: the setup token
             # checked above already stands in for it.
             _auth.password_hash = _hash_password(
                 payload.password,
             )
             _ensure_setup_token()  # password now set -> token retired
+        if two_factor_change and _auth.password_hash:
+            _auth.two_factor = bool(payload.two_factor)
         nets: list[str] = []
         for n in payload.allowed_networks:
             n = n.strip()
@@ -2567,6 +2862,7 @@ async def update_auth_settings(
         "status": "ok",
         "has_password": bool(_auth.password_hash),
         "allowed_networks": _auth.allowed_networks,
+        "two_factor": _auth.two_factor,
     }
 
 
@@ -2619,6 +2915,24 @@ async def health(response: Response) -> dict[str, Any]:
     }
 
 
+def _csv_cell(value: Any) -> Any:
+    """Neutralise spreadsheet formulas in text cells.
+
+    Text columns (name, interface, error) carry strings a monitored host
+    can influence; a leading = + - @ or tab makes Excel/LibreOffice
+    evaluate the cell. Numbers are left alone so they stay numbers.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if value[0] in "=+-@\t\r":
+        try:
+            float(value)
+            return value
+        except ValueError:
+            return "'" + value
+    return value
+
+
 @app.get("/api/logs/{server_name}")
 async def download_logs(server_name: str) -> StreamingResponse:
     """Download combined CSV log for the given server."""
@@ -2637,14 +2951,20 @@ async def download_logs(server_name: str) -> StreamingResponse:
     )
     writer.writeheader()
     for fp in files:
-        with fp.open(encoding="utf-8", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                filtered = {
-                    k: row.get(k, "")
-                    for k in _CSV_COLUMNS
-                }
-                writer.writerow(filtered)
+        try:
+            with fp.open(encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    filtered = {
+                        k: _csv_cell(row.get(k, ""))
+                        for k in _CSV_COLUMNS
+                    }
+                    writer.writerow(filtered)
+        except csv.Error:
+            # One damaged day (a NUL from an unclean shutdown) should
+            # not make every other day undownloadable.
+            logger.warning("skipping unreadable log %s", fp, exc_info=True)
+            continue
 
     content = buf.getvalue().encode("utf-8")
     filename = f"{safe}_logs.csv"
