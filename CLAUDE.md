@@ -16,6 +16,9 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 pip install pytest httpx
 pytest -q
 
+# Frontend load check (catches runtime errors that break the whole page)
+npm i --no-save jsdom@24 && node tests/frontend_smoke.js
+
 # Syntax check
 python -m py_compile app/main.py
 
