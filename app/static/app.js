@@ -959,8 +959,8 @@ $("loginCode").addEventListener("keydown", (e) => {
 });
 
 /* second step of the login: the password was accepted and a one-time
-   code went to Telegram; the same button now submits the code */
-let awaitingCode = false;
+   code went to Telegram; the same button now submits the code.
+   Declared at the top: applyI18n() reads it before this point runs. */
 
 function setLoginStep(code) {
   awaitingCode = code;
