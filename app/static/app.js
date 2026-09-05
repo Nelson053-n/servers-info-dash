@@ -225,6 +225,8 @@ const I = {
 };
 
 let lang = localStorage.getItem("lang") || "ru";
+/* login step flag; read by the i18n pass below, so it lives up here */
+let awaitingCode = false;
 
 function t(key) { return I[lang][key] || key; }
 
