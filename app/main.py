@@ -2210,6 +2210,28 @@ _notified_state: dict[str, set[str]] = {}
 _trigger_counts: dict[str, dict[str, int]] = {}
 
 
+def _tg_api(
+    token: str, method: str, payload: dict[str, Any], timeout: int = 10,
+) -> Any:
+    """Call a Bot API method (sync). Returns `result`, or None on failure."""
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/{method}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Telegram %s failed: %s", method, exc)
+        return None
+    if not isinstance(data, dict) or not data.get("ok"):
+        logger.warning("Telegram %s rejected: %s", method, data)
+        return None
+    return data.get("result")
+
+
 def _send_telegram(token: str, chat_id: str, text: str) -> bool:
     """Send a message via Telegram Bot API (sync). True on success."""
     url = (
@@ -2497,6 +2519,7 @@ async def _start_background_tasks() -> None:
             token,
         )
     asyncio.create_task(_background_collector())
+    asyncio.create_task(_telegram_callback_poller())
 
 
 @app.on_event("shutdown")
@@ -2641,22 +2664,127 @@ async def _issue_session(
     return resp
 
 
-async def _send_2fa_code(ip: str) -> str | None:
+# "Это не я" buttons: deny_id -> {ip, pending, created, message_id}.
+# Kept past the code's lifetime so a late press still blocks the address.
+_DENY_TTL_SEC = 1800
+_deny_requests: dict[str, dict[str, Any]] = {}
+
+
+async def _send_2fa_code(ip: str, pending: str) -> str | None:
     """Mail a fresh code to Telegram; returns the code, or None if unsent."""
     code = str(
         secrets.randbelow(10 ** _2FA_CODE_DIGITS),
     ).zfill(_2FA_CODE_DIGITS)
+    deny_id = secrets.token_urlsafe(16)
     text = (
         "🔐 <b>Код входа в дашборд</b>\n"
         f"<code>{code}</code>\n"
         f"IP: {ip}\n"
-        f"Действует {_2FA_CODE_TTL_SEC // 60} минут. "
-        "Если это не вы — смените пароль."
+        f"Действует {_2FA_CODE_TTL_SEC // 60} минут."
     )
-    sent = await asyncio.get_running_loop().run_in_executor(
-        None, _send_telegram, cfg.bot.token, cfg.bot.chat_id, text,
+    payload = {
+        "chat_id": cfg.bot.chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [[{
+                "text": "🚫 Это не я — заблокировать IP",
+                "callback_data": f"deny:{deny_id}",
+            }]],
+        },
+    }
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, _tg_api, cfg.bot.token, "sendMessage", payload,
     )
-    return code if sent else None
+    if result is None:
+        return None
+    now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
+    for did, entry in list(_deny_requests.items()):
+        if now_ts - entry["created"] > _DENY_TTL_SEC:
+            _deny_requests.pop(did, None)
+    _deny_requests[deny_id] = {
+        "ip": ip,
+        "pending": pending,
+        "created": now_ts,
+        "message_id": result.get("message_id") if isinstance(result, dict) else None,
+    }
+    return code
+
+
+def _deny_login(deny_id: str) -> str:
+    """Handle an "Это не я" press. Returns the text shown to the presser."""
+    entry = _deny_requests.pop(deny_id, None)
+    now = dt.datetime.now(dt.timezone.utc)
+    if entry is None or now.timestamp() - entry["created"] > _DENY_TTL_SEC:
+        return "Запрос устарел"
+    ip = entry["ip"]
+    ip_key = _limiter_key(ip)
+    with _AUTH_LOCK:
+        _pending_2fa.pop(entry["pending"], None)
+        _auth.blocked_until[ip_key] = (
+            now + dt.timedelta(minutes=_BLOCK_MINUTES)
+        ).isoformat()
+        _auth.fail_counts.pop(ip_key, None)
+        # Whoever is on that address does not belong here.
+        for tok, sip in list(_auth.sessions.items()):
+            if sip == ip:
+                _auth.sessions.pop(tok, None)
+                _auth.session_created.pop(tok, None)
+        _save_auth(_auth)
+    logger.warning("login denied from Telegram: %s blocked", ip)
+    return f"IP {ip} заблокирован на {_BLOCK_MINUTES} мин"
+
+
+def _handle_callback(cq: dict[str, Any]) -> None:
+    """One callback_query update from getUpdates (sync, in a thread)."""
+    msg = cq.get("message") or {}
+    chat_id = str((msg.get("chat") or {}).get("id", ""))
+    data = str(cq.get("data", ""))
+    if chat_id != str(cfg.bot.chat_id) or not data.startswith("deny:"):
+        return
+    text = _deny_login(data[len("deny:"):])
+    _tg_api(cfg.bot.token, "answerCallbackQuery", {
+        "callback_query_id": cq.get("id"),
+        "text": text,
+        "show_alert": True,
+    })
+    if msg.get("message_id") is not None:
+        # Take the button away so the outcome is visible in the chat.
+        _tg_api(cfg.bot.token, "editMessageReplyMarkup", {
+            "chat_id": chat_id,
+            "message_id": msg["message_id"],
+            "reply_markup": {"inline_keyboard": []},
+        })
+
+
+async def _telegram_callback_poller() -> None:
+    """Long-poll getUpdates for button presses. The bot must have no
+    webhook and no other getUpdates consumer, or Telegram answers 409."""
+    loop = asyncio.get_running_loop()
+    offset: int | None = None
+    while True:
+        if not _bot_ready():
+            await asyncio.sleep(30)
+            continue
+        payload: dict[str, Any] = {
+            "timeout": 25, "allowed_updates": ["callback_query"],
+        }
+        if offset is not None:
+            payload["offset"] = offset
+        updates = await loop.run_in_executor(
+            None, _tg_api, cfg.bot.token, "getUpdates", payload, 35,
+        )
+        if not isinstance(updates, list):
+            await asyncio.sleep(15)
+            continue
+        for upd in updates:
+            offset = int(upd.get("update_id", 0)) + 1
+            cq = upd.get("callback_query")
+            if cq:
+                try:
+                    await loop.run_in_executor(None, _handle_callback, cq)
+                except Exception:  # noqa: BLE001
+                    logger.warning("callback handling failed", exc_info=True)
 
 
 @app.get("/api/auth/status")
@@ -2713,13 +2841,13 @@ async def auth_login(
     # Second factor: hand out a code and a short-lived pending cookie.
     now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
     _prune_pending(now_ts)
-    code = await _send_2fa_code(ip)
+    pending = secrets.token_urlsafe(32)
+    code = await _send_2fa_code(ip, pending)
     if code is None:
         return JSONResponse(
             {"detail": "Could not send the code via Telegram"},
             status_code=503,
         )
-    pending = secrets.token_urlsafe(32)
     _pending_2fa[pending] = {
         "code": code, "ip": ip, "created": now_ts,
     }

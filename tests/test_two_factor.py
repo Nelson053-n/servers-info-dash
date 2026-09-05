@@ -27,11 +27,13 @@ def m(main_module, monkeypatch):
         main_module._RateLimiter(1000, 60),
     )
     monkeypatch.setattr(main_module, "_pending_2fa", {})
+    monkeypatch.setattr(main_module, "_deny_requests", {})
 
     async def _no_collector() -> None:
         return None
 
     monkeypatch.setattr(main_module, "_background_collector", _no_collector)
+    monkeypatch.setattr(main_module, "_telegram_callback_poller", _no_collector)
     return main_module
 
 
@@ -44,13 +46,22 @@ def client(m):
 @pytest.fixture
 def telegram(m, monkeypatch):
     """Capture outgoing Telegram messages instead of calling the API."""
-    sent: list[str] = []
+    class _Sent(list):
+        calls: list = []
 
-    def fake_send(token, chat_id, text):
-        sent.append(text)
+    sent = _Sent()
+    calls: list[tuple[str, dict]] = []
+
+    def fake_api(token, method, payload, timeout=10):
+        calls.append((method, payload))
+        if method == "sendMessage":
+            sent.append(payload["text"])
+            return {"message_id": len(sent)}
         return True
 
-    monkeypatch.setattr(m, "_send_telegram", fake_send)
+    monkeypatch.setattr(m, "_tg_api", fake_api)
+    monkeypatch.setattr(m, "_send_telegram", lambda *a: True)
+    sent.calls = calls  # type: ignore[attr-defined]
     m.cfg.bot.token = "t"
     m.cfg.bot.chat_id = "c"
     m._auth.two_factor = True
@@ -107,7 +118,7 @@ def test_five_wrong_codes_block_the_address(client, telegram):
 
 
 def test_login_fails_closed_when_telegram_is_down(client, m, monkeypatch):
-    monkeypatch.setattr(m, "_send_telegram", lambda *a: False)
+    monkeypatch.setattr(m, "_tg_api", lambda *a, **k: None)
     m.cfg.bot.token = "t"
     m.cfg.bot.chat_id = "c"
     m._auth.two_factor = True
@@ -265,3 +276,52 @@ def test_tokens_are_not_reachable_without_a_session(client):
     assert client.post(
         "/api/auth/tokens", json={"name": "x", "current_password": PASSWORD},
     ).status_code == 401
+
+
+# ---- "Это не я" button ----
+
+def _deny_id(calls):
+    payload = [p for meth, p in calls if meth == "sendMessage"][-1]
+    return payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"].split(":", 1)[1]
+
+
+def test_code_message_carries_a_deny_button(client, telegram):
+    client.post("/api/auth/login", json={"password": PASSWORD})
+    payload = [p for meth, p in telegram.calls if meth == "sendMessage"][-1]
+    btn = payload["reply_markup"]["inline_keyboard"][0][0]
+    assert btn["callback_data"].startswith("deny:")
+    assert "не я" in btn["text"]
+
+
+def test_deny_press_blocks_the_address_and_kills_the_attempt(client, m, telegram):
+    client.post("/api/auth/login", json={"password": PASSWORD})
+    code = _code_from(telegram[0])
+    deny = _deny_id(telegram.calls)
+
+    m._handle_callback({
+        "id": "cb1",
+        "data": f"deny:{deny}",
+        "message": {"message_id": 1, "chat": {"id": int(m.cfg.bot.chat_id) if m.cfg.bot.chat_id.lstrip("-").isdigit() else m.cfg.bot.chat_id}},
+    })
+
+    answered = [p for meth, p in telegram.calls if meth == "answerCallbackQuery"]
+    assert answered and "заблокирован" in answered[0]["text"]
+    assert [meth for meth, _ in telegram.calls].count("editMessageReplyMarkup") == 1
+    assert not m._pending_2fa, "pending login survived the deny"
+    r = client.post("/api/auth/verify", json={"code": code})
+    assert r.status_code == 429, "the right code still worked after deny"
+    r = client.post("/api/auth/login", json={"password": PASSWORD})
+    assert r.status_code == 429
+
+
+def test_deny_from_another_chat_or_stale_id_is_harmless(client, m, telegram):
+    client.post("/api/auth/login", json={"password": PASSWORD})
+    deny = _deny_id(telegram.calls)
+
+    m._handle_callback({"id": "x", "data": f"deny:{deny}",
+                        "message": {"message_id": 1, "chat": {"id": "someone-else"}}})
+    assert m._pending_2fa, "a foreign chat cancelled the login"
+    assert not [1 for meth, _ in telegram.calls if meth == "answerCallbackQuery"]
+
+    assert m._deny_login("nope") == "Запрос устарел"
+    assert m._pending_2fa
