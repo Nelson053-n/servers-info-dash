@@ -83,6 +83,28 @@ rub_24h, rub_30d, rub_prev = one(
     f"COALESCE(sum(\"amountRub\") FILTER (WHERE \"createdAt\" > now()-interval '30 days'),0), "
     f"COALESCE(sum(\"amountRub\") FILTER (WHERE \"createdAt\" <= now()-interval '30 days'),0) "
     f"FROM \"Transaction\" WHERE {PAID} AND \"createdAt\" > now()-interval '60 days'", 3)
+# ── Выручка календарными месяцами (по Владивостоку): с 1-го числа против тех же дней прошлого месяца ──
+LOC = "((\"createdAt\" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Vladivostok')"
+NOWL = "(now() AT TIME ZONE 'Asia/Vladivostok')"
+rub_mtd, rub_prev_same, rub_prev_month = one(
+    f"SELECT COALESCE(sum(\"amountRub\") FILTER (WHERE {LOC} >= date_trunc('month', {NOWL})),0), "
+    f"COALESCE(sum(\"amountRub\") FILTER (WHERE {LOC} >= date_trunc('month', {NOWL} - interval '1 month') "
+    f"AND {LOC} < {NOWL} - interval '1 month'),0), "
+    f"COALESCE(sum(\"amountRub\") FILTER (WHERE {LOC} >= date_trunc('month', {NOWL} - interval '1 month') "
+    f"AND {LOC} < date_trunc('month', {NOWL})),0) "
+    f"FROM \"Transaction\" WHERE {PAID} AND \"createdAt\" > now() - interval '70 days'", 3)
+month_rows = q(f"SELECT to_char(date_trunc('month', {LOC}), 'YYYY-MM'), sum(\"amountRub\") FROM \"Transaction\" "
+               f"WHERE {PAID} AND {LOC} >= date_trunc('month', {NOWL} - interval '11 months') GROUP BY 1")
+_first = today.replace(day=1)
+months = []
+for i in range(11, -1, -1):
+    y, m = divmod(_first.year * 12 + _first.month - 1 - i, 12)
+    months.append(f"{y:04d}-{m + 1:02d}")
+_mrev = {r[0]: num(r[1]) or 0 for r in month_rows}
+MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+MONTHS_ACC = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+_pm = (_first - dt.timedelta(days=1))
+_same_day = min(today.day, _pm.day)
 pend_old = one("SELECT count(*) FROM \"Transaction\" WHERE type='PURCHASE' AND status='PENDING' "
                "AND \"paymentMethod\"='YUKASSA' AND \"createdAt\" < now()-interval '24 hours' "
                "AND \"createdAt\" > now()-interval '7 days'")
@@ -166,6 +188,9 @@ svc_ok = s_bot == "active" and s_web == "active" and health == 200
 kpis = [
     {"id": "services", "label": "nb-bot / nb-web", "value": "работают" if svc_ok else f"{s_bot} / {s_web}, health {health}",
      "state": "ok" if svc_ok else "bad"},
+    {"id": "revenue_month", "label": f"Выручка с 1 {MONTHS_GEN[today.month - 1]}", "value": rub_mtd, "unit": "₽",
+     "delta": delta(rub_mtd, rub_prev_same), "delta_label": f"к 1–{_same_day} {MONTHS_GEN[_pm.month - 1]}",
+     "hint": "PURCHASE COMPLETED, amountRub; месяц по Владивостоку"},
     {"id": "generations_24h", "label": "Генераций за сутки", "value": g_total, "unit": "шт",
      "hint": f"DONE {g_done}, FAILED {g_failed}"},
     {"id": "error_rate_24h", "label": "Ошибок за сутки", "value": err_pct, "unit": "%",
@@ -174,6 +199,7 @@ kpis = [
      "delta": delta(rub_30d, rub_prev), "delta_label": "к прошлым 30 дням",
      "hint": "PURCHASE COMPLETED, amountRub (Stars — в рублёвом эквиваленте)"},
     {"id": "revenue_24h", "label": "Выручка за сутки", "value": rub_24h, "unit": "₽"},
+    {"id": "revenue_prev_month", "label": f"Выручка за {MONTHS_ACC[_pm.month - 1]}", "value": rub_prev_month, "unit": "₽"},
     {"id": "users_24h", "label": "Новых пользователей за сутки", "value": u_24h, "unit": "шт"},
     {"id": "users_30d", "label": "Новых пользователей за 30 дней", "value": u_30d, "unit": "шт",
      "delta": delta(u_30d, u_prev), "delta_label": "к прошлым 30 дням"},
@@ -185,6 +211,9 @@ kpis = [
      "state": "warn" if (a_24h or 0) > 0 else "ok"},
 ]
 charts = [
+    {"id": "revenue_monthly", "title": "Выручка по месяцам", "kind": "bar", "unit": "₽",
+     "note": "покупки COMPLETED; текущий месяц неполный",
+     "series": [{"name": "₽", "points": [[m, _mrev.get(m, 0)] for m in months]}]},
     {"id": "generations_daily", "title": "Генерации по дням", "kind": "bar", "unit": "шт",
      "note": "по дате создания, сутки по Владивостоку",
      "series": [{"name": "DONE", "points": daily(gen_rows, 1)}, {"name": "FAILED", "points": daily(gen_rows, 2)}]},
