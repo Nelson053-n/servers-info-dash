@@ -2,7 +2,7 @@
 refresh_sec: 300
 projects:
   - id: vpn
-    name: OneYear VPN
+    name: OneYearSolution
     stage: В проде
     link: https://panel.example.com
     check_url: https://panel.example.com/api/health

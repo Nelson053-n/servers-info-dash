@@ -296,7 +296,7 @@
     try { const s = snoozed(); s[key] = Date.now() + 24 * 3600 * 1000; localStorage.setItem(SNOOZE_KEY, JSON.stringify(s)); }
     catch (e) { /* приватный режим: отложить не получится, пункт останется */ }
   }
-  /* Все матрицы связности из подробных документов проектов (сейчас — OneYear VPN). */
+  /* Все матрицы связности из подробных документов проектов (сейчас — OneYearSolution). */
   const allMatrices = () => Object.values(details).flatMap((d) => (d && d.analytics && d.analytics.matrices) || []);
   /* Живые VPN-выходы через сервер с таким именем: «up0 · Финляндия · 15 мс» → {exit, ping, copy}. */
   function liveExitsVia(name) {
