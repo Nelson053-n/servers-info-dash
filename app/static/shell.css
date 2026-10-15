@@ -210,6 +210,20 @@ a.pcard.bad{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
   .grid2{grid-template-columns:1fr}
 }
 
+/* трафик по серверам */
+.tr-total{margin:-6px 0 12px}
+.tr-list{display:flex;flex-direction:column;gap:2px}
+.tr-row{display:grid;grid-template-columns:minmax(110px,170px) 1fr 74px 96px;gap:10px;align-items:center;padding:5px 6px;border-radius:7px;
+  color:var(--text);text-decoration:none;font-size:13px}
+.tr-row:hover{background:var(--panel2)}
+.tr-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr-bar{height:10px;border-radius:5px;background:var(--panel2);overflow:hidden}
+.tr-bar i{display:block;height:100%;border-radius:5px;background:var(--accent)}
+.tr-row.down .tr-bar i{background:var(--bad)}
+.tr-v{text-align:right}
+.tr-now{text-align:right;font-size:11px;color:var(--muted);white-space:nowrap}
+.tr-row.down .tr-now{color:var(--bad-fg)}
+@media (max-width:760px){.tr-row{grid-template-columns:minmax(90px,1fr) 1fr 64px}.tr-now{display:none}}
 /* ===== v2: заголовок-вывод, связанные замечания, доход, список проектов, карточка сервера, поиск ===== */
 .rail-search{display:flex;align-items:center;gap:10px;min-height:38px;padding:0 10px;border-radius:9px;border:1px solid var(--line);
   background:var(--panel);color:var(--muted);font:inherit;font-size:13px;cursor:pointer;text-align:left}

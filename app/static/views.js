@@ -532,6 +532,41 @@
     return card;
   }
 
+  /* ---------- трафик по серверам ---------- */
+  let trafficPeriod = "1d";
+  const gb = (v) => v == null ? "—" : v >= 1000 ? nf(v / 1000, 2) + " ТБ" : v >= 10 ? Math.round(v) + " ГБ" : nf(v, 1) + " ГБ";
+  function trafficCard() {
+    const card = el("section", "card");
+    card.id = "traffic";
+    const head = el("div", "card-head"), f = el("div", "filters");
+    [["1d", "Сутки"], ["30d", "30 дней"]].forEach(([k, t]) => {
+      const b = el("button", "", t); b.type = "button"; b.setAttribute("aria-pressed", String(trafficPeriod === k));
+      b.addEventListener("click", () => { trafficPeriod = k; renderOverview(); });
+      f.append(b);
+    });
+    head.append(el("h2", null, "Трафик по серверам"), f);
+    card.append(head);
+    const key = trafficPeriod === "1d" ? "traffic_1d_gb" : "traffic_30d_gb";
+    const servers = ((metrics && metrics.servers) || []).filter((s) => s[key] != null).sort((a, b) => (b[key] || 0) - (a[key] || 0));
+    if (!servers.length) { card.append(el("p", "muted", "Нет данных о трафике")); return card; }
+    const total = servers.reduce((a, s) => a + (s[key] || 0), 0), max = servers[0][key] || 1;
+    card.append(el("div", "muted tr-total", "Всего " + gb(total) + (trafficPeriod === "1d" ? " за сутки" : " за 30 дней") + " · сейчас приём / отдача, Мбит/с"));
+    const list = el("div", "tr-list");
+    servers.forEach((s) => {
+      const row = el("a", "tr-row" + (s.status !== "up" ? " down" : ""));
+      row.href = "#servers/" + encodeURIComponent(s.name);
+      const bar = el("span", "tr-bar"), fill = el("i");
+      fill.style.width = Math.max(1, 100 * (s[key] || 0) / max) + "%";
+      bar.append(fill);
+      row.append(el("span", "tr-name", s.name), bar, el("span", "tr-v mono", gb(s[key])),
+        el("span", "tr-now mono", s.status === "up" ? nf(s.rx_mbps || 0, 1) + " / " + nf(s.tx_mbps || 0, 1) : "нет связи"));
+      row.title = `${s.name}: ${gb(s[key])}, сейчас приём ${nf(s.rx_mbps || 0, 1)} и отдача ${nf(s.tx_mbps || 0, 1)} Мбит/с`;
+      list.append(row);
+    });
+    card.append(list);
+    return card;
+  }
+
   /* ---------- серверы по ролям ---------- */
   function rolesCard() {
     const card = el("section", "card");
@@ -591,9 +626,11 @@
     if (money.length) { const g = el("div", "grid2"); money.forEach((c) => g.append(c)); v.append(g); }
     const mid = el("div", "grid2");
     Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => mid.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
-    mid.append(rolesCard());
+    mid.append(trafficCard());
     v.append(mid, projectList());
-    v.append(certCard(false));
+    const bottom = el("div", "grid2");
+    bottom.append(rolesCard(), certCard(false));
+    v.append(bottom);
   }
 
   /* ---------- карточка сервера ---------- */
