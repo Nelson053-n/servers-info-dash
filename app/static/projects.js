@@ -35,7 +35,7 @@
     if (unit === "$") s = abs < 1 ? nf(v, 4) : nf(v, 2);
     else if (abs >= 100000) s = nf(v / 1000, 0) + " тыс";
     else s = nf(v, abs < 10 ? 2 : abs < 100 ? 1 : 0);
-    if (!unit) return s;
+    if (!unit || unit === "шт") return s;
     if (unit === "$") return "$" + s;
     return s + " " + unit;
   }
@@ -61,11 +61,13 @@
   const colorFor = (name, i) => /fail|ошиб|error|отказ/i.test(name) ? "var(--bad)" : PALETTE[i % PALETTE.length];
 
   /* ---------- графики ---------- */
+  /* верх оси = 4 ровных деления: шаг 1/2/2,5/5 × 10^n, чтобы подписи были круглыми */
   function niceMax(v) {
-    if (v <= 0) return 1;
-    const p = Math.pow(10, Math.floor(Math.log10(v)));
-    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
-    return 10 * p;
+    if (v <= 0) return 4;
+    const raw = v / 4;
+    const p = Math.pow(10, Math.floor(Math.log10(raw)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= raw) return 4 * m * p;
+    return 40 * p;
   }
 
   function drawChart(box, chart, opts) {
@@ -81,9 +83,16 @@
     const iw = W - m.l - m.r, ih = H - m.t - m.b;
     const stacked = chart.kind === "bar" && series.length > 1;
     const totals = xs.map((_, i) => series.reduce((a, s) => a + (Number((s.points[i] || [])[1]) || 0), 0));
-    const maxV = niceMax(stacked ? Math.max(...totals) :
-      Math.max(...series.flatMap((s) => s.points.map((p) => Number(p[1]) || 0))));
-    const minV = chart.kind === "line" ? Math.min(0, ...series.flatMap((s) => s.points.map((p) => Number(p[1]) || 0))) : 0;
+    const vals = series.flatMap((s) => s.points.map((p) => Number(p[1]) || 0));
+    let minV = 0, maxV;
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    if (chart.kind === "line" && lo > 0 && hi > lo && lo > hi * 0.5) {
+      /* уровень (курс, баланс) далеко от нуля: ось по диапазону данных, иначе линия плоская */
+      const pad = (hi - lo) * 0.15;
+      minV = lo - pad; maxV = hi + pad;
+    } else {
+      maxV = niceMax(stacked ? Math.max(...totals) : hi);
+    }
     const y = (v) => m.t + ih - (ih * (v - minV)) / (maxV - minV || 1);
     const step = iw / xs.length;
     const xc = (i) => m.l + step * i + step / 2;
@@ -203,7 +212,7 @@
       (tb.columns || []).forEach((c) => {
         const v = r[c.key];
         const td = el("td", c.num ? "num" : "");
-        if (c.state) td.append(pill(v, STATE[v] ? undefined : String(v)));
+        if (c.state) td.append(pill(v, {ok: "норма", warn: "внимание", bad: "проблема"}[v] || String(v)));
         else td.textContent = v == null ? "—" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
         tr.append(td);
       });
