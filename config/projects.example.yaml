@@ -18,7 +18,7 @@ projects:
     check_url: https://bananagen.example/api/health
     tls_host: bananagen.example
     analytics:
-      kind: file                          # пишет deploy/collectors/nanabanana-summary.sh (root-крон)
+      kind: file                          # пишет deploy/collectors/nanabanana-analytics.sh (root-крон)
       path: /var/lib/infodash/projects/nanabanana.json
       max_age_min: 30
 # Сертификаты, у которых важен только срок
