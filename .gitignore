@@ -13,6 +13,7 @@ __pycache__/
 config/servers.yaml
 config/auth.yaml
 config/key-info.yaml
+config/projects.yaml
 config/.servers.yaml.pytest
 
 # Private keys must never be committed

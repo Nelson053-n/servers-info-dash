@@ -33,6 +33,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app import projects as projects_tab
+
 logger = logging.getLogger("serverinfo")
 
 
@@ -2520,6 +2522,7 @@ async def _start_background_tasks() -> None:
         )
     asyncio.create_task(_background_collector())
     asyncio.create_task(_telegram_callback_poller())
+    asyncio.create_task(projects_tab.run_forever())
 
 
 @app.on_event("shutdown")
@@ -3108,6 +3111,11 @@ async def index() -> FileResponse:
 async def metrics() -> dict[str, Any]:
     async with _metrics_lock:
         return _cached_metrics
+
+
+@app.get("/api/projects")
+async def projects() -> dict[str, Any]:
+    return projects_tab.snapshot()
 
 
 @app.get("/api/health")

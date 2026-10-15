@@ -165,6 +165,42 @@ tr:last-child td{border-bottom:none}
   font-size:13px;border:1px solid var(--line);border-radius:8px}
 .sec-history table{margin:0;border:none;font-size:13px}
 .sec-history th,.sec-history td{padding:5px 8px;font-size:12px}
+/* вкладки и «Проекты» */
+.tabs{display:flex;gap:4px;margin-bottom:8px}
+.tabs .btn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pj-off{display:none!important}
+#projectsView{display:grid;gap:10px}
+#projectsView.stale{opacity:.55}
+.pj-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.pj-card h2{margin:0 0 8px;font-size:14px;font-weight:600}
+.pj-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr))}
+.pj-tiles{display:grid;gap:6px 12px;grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
+.pj-tile{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--line);padding-top:5px}
+.pj-lbl{font-size:11px;color:var(--muted)}
+.pj-val{font-size:18px;font-variant-numeric:tabular-nums}
+.pj-tile.warn .pj-val{color:#f59e0b}
+.pj-tile.bad .pj-val,.pj-badtext{color:var(--bad)}
+.pj-take{font-size:15px;font-weight:600}
+.pj-take.ok{color:var(--ok)}.pj-take.warn{color:#f59e0b}.pj-take.bad{color:var(--bad)}
+#pjAttention{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:4px;font-size:13px}
+#pjAttention li{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.pj-pill{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px}
+.pj-pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.pj-pill.warn::before{background:#f59e0b}.pj-pill.bad::before{background:var(--bad)}
+.pj-muted{color:var(--muted);font-size:12px;margin:0}
+.pj-scroll{overflow-x:auto}
+.pj-table{width:100%;border-collapse:collapse;font-size:13px}
+.pj-table th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:4px 6px;border-bottom:1px solid var(--line)}
+.pj-table td{padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+.pj-table a{color:var(--text)}
+.pj-table .num,.pj-tls .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.pj-tls{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) 60px;gap:8px;align-items:center;font-size:12px;padding:2px 0}
+.pj-host{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pj-bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.pj-bar i{display:block;height:100%;background:var(--muted);border-radius:3px}
+.pj-tls.warn .pj-bar i{background:#f59e0b}.pj-tls.bad .pj-bar i{background:var(--bad)}
+.pj-tls.bad .num{color:var(--bad)}
+@media (max-width:700px){.pj-narrow{display:none}}
 </style>
 </head>
 <body>
@@ -194,6 +230,11 @@ tr:last-child td{border-bottom:none}
     </div>
   </header>
   <div class="sub" id="meta"></div>
+
+  <nav class="tabs" id="tabs">
+    <button class="btn" type="button" data-tab="servers">Серверы</button>
+    <button class="btn" type="button" data-tab="projects">Проекты</button>
+  </nav>
 
   <div class="toolbar">
     <button class="btn" id="toggleAdd" type="button"></button>
@@ -308,6 +349,31 @@ tr:last-child td{border-bottom:none}
     </thead>
     <tbody id="rows"></tbody>
   </table>
+  <section id="projectsView" class="hidden">
+    <div class="pj-card">
+      <div class="pj-take" id="pjTakeaway">—</div>
+      <div class="pj-muted" id="pjMeta"></div>
+      <ul id="pjAttention"></ul>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-card"><h2>OneYear VPN</h2><div class="pj-tiles" id="pjVpn"></div></div>
+      <div class="pj-card"><h2>Бананоген</h2><div class="pj-tiles" id="pjNb"></div></div>
+      <div class="pj-card"><h2>Серверы</h2><div class="pj-tiles" id="pjServers"></div></div>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-card">
+        <h2>Проекты</h2>
+        <div class="pj-scroll">
+          <table class="pj-table">
+            <thead><tr><th>Проект</th><th>Статус</th><th class="pj-narrow">Стадия</th><th class="num">HTTP</th>
+              <th class="num pj-narrow">мс</th><th class="num">TLS</th><th class="pj-narrow">Замечания</th></tr></thead>
+            <tbody id="pjRows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="pj-card"><h2>TLS-сертификаты</h2><div id="pjTls"></div></div>
+    </div>
+  </section>
 </div>
 
 <!-- login overlay (hidden by default) -->
@@ -336,5 +402,6 @@ tr:last-child td{border-bottom:none}
 </div>
 
 <script src="/static/app.js?v=20260905d"></script>
+<script src="/static/projects.js?v=20261015a"></script>
 </body>
 </html>
