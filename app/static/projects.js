@@ -32,19 +32,22 @@
     if (typeof v !== "number") return String(v);
     const abs = Math.abs(v);
     let s;
-    if (unit === "$") s = abs < 1 ? nf(v, 4) : nf(v, 2);
-    else if (abs >= 100000) s = nf(v / 1000, 0) + " тыс";
+    if (unit === "$") s = abs < 1 ? nf(v, 4) : abs >= 10000 ? nf(v, 0) : nf(v, 2);
+    else if (abs >= 1e6) s = nf(v / 1e6, 2) + " млн";
+    else if (abs >= 1e5) s = nf(v / 1e3, 0) + " тыс";
     else s = nf(v, abs < 10 ? 2 : abs < 100 ? 1 : 0);
     if (!unit || unit === "шт") return s;
     if (unit === "$") return "$" + s;
     return s + " " + unit;
   }
-  function compact(v) {
-    const a = Math.abs(v);
-    if (a >= 1e6) return nf(v / 1e6, 1) + " млн";
-    if (a >= 1e4) return nf(v / 1e3, 0) + " тыс";
-    if (a >= 1e3) return nf(v / 1e3, 1) + " тыс";
-    return nf(v, a < 10 ? 2 : 0);
+  /* подпись оси: знаков после запятой ровно столько, чтобы соседние деления различались */
+  function compact(v, step) {
+    if (v === 0) return "0";
+    const a = Math.max(Math.abs(v), step || 0);
+    const digits = (div) => Math.min(3, Math.max(0, Math.ceil(-Math.log10((step || div) / div) - 1e-9)));
+    if (a >= 1e6) return nf(v / 1e6, digits(1e6)) + " млн";
+    if (a >= 1e3) return nf(v / 1e3, digits(1e3)) + " тыс";
+    return nf(v, digits(1));
   }
   const parseX = (x) => new Date(/^\d{4}-\d{2}-\d{2}$/.test(x) ? x + "T00:00:00" : x);
   const fmtX = (x, withTime) => {
@@ -61,13 +64,11 @@
   const colorFor = (name, i) => /fail|ошиб|error|отказ/i.test(name) ? "var(--bad)" : PALETTE[i % PALETTE.length];
 
   /* ---------- графики ---------- */
-  /* верх оси = 4 ровных деления: шаг 1/2/2,5/5 × 10^n, чтобы подписи были круглыми */
-  function niceMax(v) {
-    if (v <= 0) return 4;
-    const raw = v / 4;
+  /* шаг оси 1/2/2,5/5 × 10^n — подписи делений круглые */
+  function niceStep(raw) {
     const p = Math.pow(10, Math.floor(Math.log10(raw)));
-    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= raw) return 4 * m * p;
-    return 40 * p;
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= raw - 1e-12) return m * p;
+    return 10 * p;
   }
 
   function drawChart(box, chart, opts) {
@@ -79,31 +80,41 @@
     const withTime = xs.some((x) => x.length > 10);
     const W = Math.max(box.clientWidth, 200);
     const H = opts.spark ? 46 : 220;
-    const m = opts.spark ? {l: 0, r: 0, t: 4, b: 2} : {l: 52, r: 12, t: 10, b: 26};
-    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const m = opts.spark ? {l: 0, r: 0, t: 4, b: 2} : {l: 52, r: 12, t: 10, b: 26};  /* l уточняется по подписям ниже */
+    const ih = H - m.t - m.b;
     const stacked = chart.kind === "bar" && series.length > 1;
-    const totals = xs.map((_, i) => series.reduce((a, s) => a + (Number((s.points[i] || [])[1]) || 0), 0));
+    const val = (s, i) => Number((s.points[i] || [])[1]) || 0;
+    const totals = xs.map((_, i) => series.reduce((a, s) => a + val(s, i), 0));
+    /* для стопки положительные части растут вверх от нуля, отрицательные — вниз */
+    const posSum = xs.map((_, i) => series.reduce((a, s) => a + Math.max(0, val(s, i)), 0));
+    const negSum = xs.map((_, i) => series.reduce((a, s) => a + Math.min(0, val(s, i)), 0));
     const vals = series.flatMap((s) => s.points.map((p) => Number(p[1]) || 0));
-    let minV = 0, maxV;
-    const lo = Math.min(...vals), hi = Math.max(...vals);
-    if (chart.kind === "line" && lo > 0 && hi > lo && lo > hi * 0.5) {
-      /* уровень (курс, баланс) далеко от нуля: ось по диапазону данных, иначе линия плоская */
-      const pad = (hi - lo) * 0.15;
-      minV = lo - pad; maxV = hi + pad;
-    } else {
-      maxV = niceMax(stacked ? Math.max(...totals) : hi);
+    let lo = stacked ? Math.min(...negSum) : Math.min(...vals);
+    let hi = stacked ? Math.max(...posSum) : Math.max(...vals);
+    /* уровень далеко от нуля (курс, стоимость портфеля): ось по диапазону данных, иначе линия плоская */
+    const level = chart.kind === "line" && lo > 0 && hi > lo && lo > hi * 0.5;
+    if (!level) { lo = Math.min(0, lo); hi = Math.max(0, hi); }
+    if (hi === lo) hi = lo + 1;
+    const step = niceStep((hi - lo) / 4);
+    const minV = Math.floor(lo / step + 1e-9) * step;
+    const maxV = Math.ceil(hi / step - 1e-9) * step;
+    if (!opts.spark) {
+      /* левое поле по самой длинной подписи деления, ~6,5 px на символ при 11 px */
+      let longest = 0;
+      for (let v = minV; v <= maxV + step / 2; v += step) longest = Math.max(longest, compact(Math.abs(v) < step / 2 ? 0 : v, step).length);
+      m.l = Math.max(36, Math.ceil(longest * 6.5) + 12);
     }
+    const iw = W - m.l - m.r;
+    const colW = iw / xs.length;
+    const xc = (i) => m.l + colW * i + colW / 2;
     const y = (v) => m.t + ih - (ih * (v - minV)) / (maxV - minV || 1);
-    const step = iw / xs.length;
-    const xc = (i) => m.l + step * i + step / 2;
     const root = svg("svg", {viewBox: `0 0 ${W} ${H}`, width: "100%", height: H, role: "img", "aria-label": chart.title || ""});
 
     if (!opts.spark) {
-      for (let k = 0; k <= 4; k++) {
-        const v = minV + ((maxV - minV) * k) / 4;
-        root.append(svg("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), class: "pj-grid"}));
+      for (let v = minV; v <= maxV + step / 2; v += step) {
+        root.append(svg("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), class: Math.abs(v) < step / 2 && minV < 0 ? "pj-grid pj-zero" : "pj-grid"}));
         const t = svg("text", {x: m.l - 6, y: y(v) + 4, "text-anchor": "end", class: "pj-axis"});
-        t.textContent = compact(v);
+        t.textContent = compact(Math.abs(v) < step / 2 ? 0 : v, step);
         root.append(t);
       }
       const every = Math.max(1, Math.ceil(xs.length / Math.max(2, Math.floor(iw / 56))));
@@ -120,15 +131,16 @@
     }
 
     if (chart.kind === "bar") {
-      const bw = Math.max(1, Math.min(28, step * 0.7));
+      const bw = Math.max(1, Math.min(28, colW * 0.7));
       xs.forEach((_, i) => {
-        let acc = 0;
+        let up = 0, down = 0;
         series.forEach((s, si) => {
-          const v = Number((s.points[i] || [])[1]) || 0;
+          const v = val(s, i);
           if (!v) return;
-          const y0 = y(stacked ? acc : 0), y1 = y((stacked ? acc : 0) + v);
-          acc += v;
-          root.append(svg("rect", {x: xc(i) - bw / 2, y: y1, width: bw, height: Math.max(1, y0 - y1),
+          const base = !stacked ? 0 : v > 0 ? up : down;
+          if (stacked) { if (v > 0) up += v; else down += v; }
+          const top = y(Math.max(base, base + v)), bottom = y(Math.min(base, base + v));
+          root.append(svg("rect", {x: xc(i) - bw / 2, y: top, width: bw, height: Math.max(1, bottom - top),
             rx: Math.min(3, bw / 2), fill: colorFor(s.name, si), class: "pj-barrect"}));
         });
       });
@@ -137,7 +149,8 @@
         const pts = s.points.map((p, i) => [xc(i), y(Number(p[1]) || 0)]);
         const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
         if (series.length === 1) {
-          const area = d + ` L ${pts[pts.length - 1][0].toFixed(1)} ${y(minV)} L ${pts[0][0].toFixed(1)} ${y(minV)} Z`;
+          const base = y(Math.max(minV, Math.min(0, maxV)));
+          const area = d + ` L ${pts[pts.length - 1][0].toFixed(1)} ${level ? y(minV) : base} L ${pts[0][0].toFixed(1)} ${level ? y(minV) : base} Z`;
           root.append(svg("path", {d: area, fill: colorFor(s.name, si), opacity: 0.12}));
         }
         root.append(svg("path", {d, fill: "none", stroke: colorFor(s.name, si), "stroke-width": opts.spark ? 1.6 : 2,
@@ -166,7 +179,7 @@
     root.addEventListener("mousemove", (ev) => {
       const r = root.getBoundingClientRect();
       const px = ((ev.clientX - r.left) / r.width) * W;
-      const i = Math.min(xs.length - 1, Math.max(0, Math.floor((px - m.l) / step)));
+      const i = Math.min(xs.length - 1, Math.max(0, Math.floor((px - m.l) / colW)));
       cursor.setAttribute("x1", xc(i)); cursor.setAttribute("x2", xc(i)); cursor.setAttribute("visibility", "visible");
       tip.textContent = "";
       tip.append(el("div", "pj-tip-x", fmtX(xs[i], withTime)));
@@ -188,7 +201,8 @@
   /* ---------- плитки и таблицы ---------- */
   function kpiTile(k, big) {
     const t = el("div", "pj-kpi " + (k.state && k.state !== "ok" ? k.state : "") + (big ? " big" : ""));
-    t.append(el("span", "pj-kpi-label", k.label), el("span", "pj-kpi-value", fmtValue(k.value, k.unit)));
+    const txt = fmtValue(k.value, k.unit);
+    t.append(el("span", "pj-kpi-label", k.label), el("span", "pj-kpi-value" + (txt.length > 8 ? " long" : ""), txt));
     if (typeof k.delta === "number") {
       const up = k.delta >= 0;
       const d = el("span", "pj-delta " + (up ? "pj-up" : "pj-down"), (up ? "▲ +" : "▼ ") + nf(k.delta, 1) + " %" + (k.delta_label ? " " + k.delta_label : ""));
@@ -213,7 +227,8 @@
         const v = r[c.key];
         const td = el("td", c.num ? "num" : "");
         if (c.state) td.append(pill(v, {ok: "норма", warn: "внимание", bad: "проблема"}[v] || String(v)));
-        else td.textContent = v == null ? "—" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
+        else if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) td.textContent = v.slice(8) + "." + v.slice(5, 7) + "." + v.slice(0, 4);
+        else td.textContent = v == null || v === "" ? "—" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
         tr.append(td);
       });
       body.append(tr);
