@@ -190,7 +190,7 @@ kpis = [
      "state": "ok" if svc_ok else "bad"},
     {"id": "revenue_month", "label": f"Выручка с 1 {MONTHS_GEN[today.month - 1]}", "value": rub_mtd, "unit": "₽",
      "delta": delta(rub_mtd, rub_prev_same), "delta_label": f"к 1–{_same_day} {MONTHS_GEN[_pm.month - 1]}",
-     "hint": "PURCHASE COMPLETED, amountRub; месяц по Владивостоку"},
+     "hint": "покупки, Stars — в рублёвом эквиваленте; месяц по Владивостоку"},
     {"id": "generations_24h", "label": "Генераций за сутки", "value": g_total, "unit": "шт",
      "hint": f"DONE {g_done}, FAILED {g_failed}"},
     {"id": "error_rate_24h", "label": "Ошибок за сутки", "value": err_pct, "unit": "%",

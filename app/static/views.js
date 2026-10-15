@@ -406,7 +406,7 @@
       const chart = (a.charts || []).find((c) => c.id === "revenue_monthly");
       const card = el("section", "card money");
       card.id = "money";
-      const head = el("div", "card-head"); head.append(el("h2", null, d.name + " — доход"), el("span", "muted", "только оплаты в рублях"));
+      const head = el("div", "card-head"); head.append(el("h2", null, d.name + " — доход"), el("span", "muted", k.hint || ""));
       card.append(head);
       const row = el("div", "money-row");
       const main = el("div"); main.append(el("div", "stat-label", k.label), el("div", "money-value", fmtValue(k.value, k.unit)));
