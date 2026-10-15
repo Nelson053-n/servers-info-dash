@@ -225,11 +225,14 @@ a.pcard.bad{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
 .hero-pill .hp-v{font-size:22px}
 .hero-pill .hp-v small{color:var(--faint);font-size:.75em}
 .hero-pill.bad .hp-v{color:var(--bad-fg)}.hero-pill.warn .hp-v{color:var(--warn-fg)}
-.grid2.top{align-items:start}
-.col{display:flex;flex-direction:column;gap:16px;min-width:0}
 .attn2{padding:0;overflow:hidden}
 .attn2 .card-head{padding:16px 20px 12px;margin:0}
-.ins{display:flex;gap:14px;padding:14px 20px;border-top:1px solid var(--line2)}
+.ins-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,420px),1fr));border-top:1px solid var(--line2)}
+.ins{display:flex;gap:14px;padding:14px 20px;border-bottom:1px solid var(--line2);border-right:1px solid var(--line2);margin-bottom:-1px}
+.attn-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;border-radius:12px;border:1px solid var(--line);background:var(--panel);font-size:14px}
+.attn-bar .btn{margin-left:auto}
+.ins-dot.ok{background:var(--ok)}
+.attn2 .card-head .btn{margin-left:auto}
 .ins-dot{width:9px;height:9px;margin-top:6px;border-radius:50%;flex-shrink:0;background:var(--warn)}
 .ins-dot.bad{background:var(--bad)}
 .ins-body{flex:1;min-width:0}
@@ -240,7 +243,6 @@ a.pcard.bad{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
 .ins-acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
 .btn.small{min-height:30px;padding:0 12px;font-size:12px;display:inline-flex;align-items:center;text-decoration:none}
 .btn.ghost{background:transparent;color:var(--text2)}
-.ins-more{margin:10px 20px 16px}
 .money-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 26px;margin-bottom:6px}
 .money-value{font-family:var(--mono);font-size:34px;line-height:1.1}
 .money-prev{font-family:var(--mono);font-size:16px}

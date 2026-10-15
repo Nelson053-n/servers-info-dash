@@ -78,7 +78,8 @@
   function compact(v, step) {
     if (v === 0) return "0";
     const a = Math.max(Math.abs(v), step || 0);
-    const digits = (div) => Math.min(3, Math.max(0, Math.ceil(-Math.log10((step || div) / div) - 1e-9)));
+    /* знаков столько, чтобы шаг в выбранных единицах был точным: 2 500 → «2,5 тыс», а не «3 тыс» */
+    const digits = (div) => { const q = (step || div) / div; let d = 0; while (d < 3 && Math.abs(Math.round(q * 10 ** d) - q * 10 ** d) > 1e-9) d++; return d; };
     if (a >= 1e6) return nf(v / 1e6, digits(1e6)) + " млн";
     if (a >= 1e3) return nf(v / 1e3, digits(1e3)) + " тыс";
     return nf(v, digits(1));
@@ -86,7 +87,13 @@
   function drawChart(box, chart, opts) {
     opts = opts || {};
     box.textContent = "";
-    const series = (chart.series || []).filter((s) => s.points && s.points.length);
+    let series = (chart.series || []).filter((s) => s.points && s.points.length);
+    /* помесячный ряд: месяцы до первых данных не показываем — иначе пол-графика пустые нули */
+    if (series.length && isMonth(series[0].points[0][0])) {
+      let first = 0;
+      while (first < series[0].points.length - 1 && series.every((s) => !Number((s.points[first] || [])[1]))) first++;
+      if (first) series = series.map((s) => ({...s, points: s.points.slice(first)}));
+    }
     if (!series.length) { box.append(el("p", "muted", "Нет данных за период")); return; }
     const xs = series[0].points.map((p) => p[0]);
     const withTime = xs.some((x) => x.length > 10);
@@ -363,13 +370,26 @@
     return h;
   }
   function attentionV2(items) {
-    const card = el("section", "card attn2");
-    const head = el("div", "card-head");
-    head.append(el("h2", null, "Требует внимания"), el("span", "muted", "с учётом всех источников"));
-    card.append(head);
     const hidden = snoozed();
     const shown = items.filter((i) => !hidden[i.key]);
-    if (!shown.length) card.append(el("div", "attn-empty", items.length ? "Всё отложенное — на сутки" : "Всё в норме"));
+    const nHidden = items.length - shown.length;
+    const showAll = el("button", "btn small ghost", `Отложено: ${nHidden} — показать`);
+    showAll.type = "button";
+    showAll.addEventListener("click", () => { try { localStorage.removeItem(SNOOZE_KEY); } catch (e) { /* ничего */ } renderOverview(); });
+    if (!shown.length) {
+      /* нечего показывать — одна строка вместо пустой карточки */
+      const bar = el("section", "attn-bar");
+      bar.append(el("span", "ins-dot ok"), el("span", null, items.length ? "Срочного нет — всё отложенное вернётся через сутки" : "Всё в норме, замечаний нет"));
+      if (nHidden) bar.append(showAll);
+      return bar;
+    }
+    const card = el("section", "card attn2");
+    const head = el("div", "card-head");
+    const nb = shown.filter((i) => i.sev === "bad").length;
+    head.append(el("h2", null, "Требует внимания"), el("span", "muted", (nb ? nb + " срочно · " : "") + (shown.length - nb) + " проверить · с учётом всех источников"));
+    if (nHidden) head.append(showAll);
+    card.append(head);
+    const grid = el("div", "ins-grid");
     shown.forEach((it) => {
       const row = el("div", "ins");
       row.append(el("span", "ins-dot " + it.sev));
@@ -384,14 +404,9 @@
       acts.append(open, later);
       body.append(acts);
       row.append(body);
-      card.append(row);
+      grid.append(row);
     });
-    const nHidden = items.length - shown.length;
-    if (nHidden) {
-      const b = el("button", "btn small ghost ins-more", `Отложено: ${nHidden} — показать`); b.type = "button";
-      b.addEventListener("click", () => { try { localStorage.removeItem(SNOOZE_KEY); } catch (e) { /* ничего */ } renderOverview(); });
-      card.append(b);
-    }
+    card.append(grid);
     return card;
   }
 
@@ -571,16 +586,14 @@
     top.append(left, pills);
     v.append(top);
 
-    const grid = el("div", "grid2 top");
-    grid.append(attentionV2(items));
-    const right = el("div", "col");
-    moneyCards().forEach((c) => right.append(c));
-    Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => right.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
-    if (right.childNodes.length) grid.append(right);
-    v.append(grid, projectList());
-    const bottom = el("div", "grid2");
-    bottom.append(rolesCard(), certCard(false));
-    v.append(bottom);
+    v.append(attentionV2(items));
+    const money = moneyCards();
+    if (money.length) { const g = el("div", "grid2"); money.forEach((c) => g.append(c)); v.append(g); }
+    const mid = el("div", "grid2");
+    Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => mid.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
+    mid.append(rolesCard());
+    v.append(mid, projectList());
+    v.append(certCard(false));
   }
 
   /* ---------- карточка сервера ---------- */
