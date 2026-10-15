@@ -36,7 +36,10 @@
     return unit === "$" ? "$" + s : s + " " + unit;
   }
   const isLong = (txt) => /[a-zа-яё]{3}/i.test(txt) && !/^[\d\s.,−\-+$₽%]+(млн|тыс)?/.test(txt);
-  const parseX = (x) => new Date(/^\d{4}-\d{2}-\d{2}$/.test(x) ? x + "T00:00:00" : x);
+  const isMonth = (x) => /^\d{4}-\d{2}$/.test(x);
+  const parseX = (x) => new Date(isMonth(x) ? x + "-01T00:00:00" : /^\d{4}-\d{2}-\d{2}$/.test(x) ? x + "T00:00:00" : x);
+  const MON = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+  const MONTH = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
   const dm = (x) => { const d = parseX(x); return isNaN(d) ? String(x) : String(d.getDate()).padStart(2, "0") + "." + String(d.getMonth() + 1).padStart(2, "0"); };
   const ago = (min) => min == null ? "" : min < 1 ? "только что" : min < 60 ? min + " мин назад" : Math.round(min / 60) + " ч назад";
   const chip = (state, text) => el("span", "chip " + (state || "ok"), text || STATE[state] || state);
@@ -126,7 +129,7 @@
         const last = i === xs.length - 1;
         if ((i % every && !last) || (!last && xs.length - 1 - i < every)) return;
         const t = svg("text", {x: last ? W - m.r : i === 0 ? m.l : xc(i), y: H - 8, "text-anchor": last ? "end" : i === 0 ? "start" : "middle", class: "pj-axis"});
-        t.textContent = withTime ? String(parseX(x).getHours()).padStart(2, "0") + ":00" : dm(x);
+        t.textContent = isMonth(x) ? MON[parseX(x).getMonth()] : withTime ? String(parseX(x).getHours()).padStart(2, "0") + ":00" : dm(x);
         root.append(t);
       });
     }
@@ -174,7 +177,9 @@
       const i = Math.min(xs.length - 1, Math.max(0, Math.floor((px - m.l) / colW)));
       cursor.setAttribute("x1", xc(i)); cursor.setAttribute("x2", xc(i)); cursor.setAttribute("visibility", "visible");
       tip.textContent = "";
-      tip.append(el("div", "pj-tip-x", withTime ? dm(xs[i]) + " " + String(parseX(xs[i]).getHours()).padStart(2, "0") + ":00" : dm(xs[i])));
+      const xd = parseX(xs[i]);
+      tip.append(el("div", "pj-tip-x", isMonth(xs[i]) ? MONTH[xd.getMonth()] + " " + xd.getFullYear()
+        : withTime ? dm(xs[i]) + " " + String(xd.getHours()).padStart(2, "0") + ":00" : dm(xs[i])));
       series.forEach((s, si) => {
         const row = el("div", "pj-tip-row"); const sw = el("i"); sw.style.background = colorFor(s.name, si);
         row.append(sw, el("span", null, s.name), el("b", null, fmtValue(val(s, i), chart.unit))); tip.append(row);
