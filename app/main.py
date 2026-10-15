@@ -2007,65 +2007,170 @@ def _sample_period_sec(
     return gap, parsed
 
 
+def _traffic_file_totals(file_path: Path, safe_name: str) -> dict[str, float]:
+    """Unrounded per-server GB in one log file.
+
+    Gaps are measured between rows of the same file only, so a file's
+    totals do not depend on any other file and can be cached per file.
+    Raises the same errors as _read_traffic_rows.
+    """
+    totals_raw: dict[str, float] = {}
+    rows = _read_traffic_rows(file_path)
+
+    # Tracked per server: rows for different servers interleave
+    # within one file, so a shared cursor would measure the wrong gap.
+    last_seen: dict[str, dt.datetime | None] = {}
+    for row_name, rx_raw, tx_raw, row_ts in rows:
+        row_key = (
+            _safe_filename(row_name)
+            if row_name
+            else safe_name
+        )
+        period_sec, parsed = _sample_period_sec(
+            row_ts, last_seen.get(row_key),
+        )
+        last_seen[row_key] = parsed
+        try:
+            rx = float(rx_raw or 0.0)
+        except (TypeError, ValueError):
+            rx = 0.0
+        try:
+            tx = float(tx_raw or 0.0)
+        except (TypeError, ValueError):
+            tx = 0.0
+        if rx <= 0 and tx <= 0:
+            continue
+        if period_sec is None:
+            # First sample of a series, or a gap too long to trust.
+            continue
+        row_total = totals_raw.get(row_key, 0.0)
+        period_megabits = (rx + tx) * period_sec
+        period_megabytes = period_megabits / 8.0
+        period_gigabytes = period_megabytes / 1000.0
+        row_total += period_gigabytes
+        totals_raw[row_key] = row_total
+    return totals_raw
+
+
+# Per-file totals, also kept on disk next to the logs so a restart does
+# not re-parse the month. A closed day's file no longer changes, so it is
+# parsed once instead of on every 5-minute refresh.
+_TRAFFIC_TOTALS_CACHE_NAME = ".daily_totals.json"
+_TRAFFIC_TOTALS_CACHE_VERSION = 1
+_traffic_file_cache_lock = Lock()
+_traffic_file_cache: dict[str, Any] = {"dir": None, "files": {}}
+
+
+def _load_traffic_file_cache(logs_dir: Path) -> dict[str, Any]:
+    """Cached entries from disk; a missing or damaged file means no cache."""
+    try:
+        data = json.loads(
+            (logs_dir / _TRAFFIC_TOTALS_CACHE_NAME).read_text(encoding="utf-8"),
+        )
+        if data.get("version") != _TRAFFIC_TOTALS_CACHE_VERSION:
+            return {}
+        valid: dict[str, Any] = {}
+        for fname, entry in data["files"].items():
+            valid[str(fname)] = {
+                "size": int(entry["size"]),
+                "mtime_ns": int(entry["mtime_ns"]),
+                "totals": {
+                    str(k): float(v) for k, v in entry["totals"].items()
+                },
+            }
+        return valid
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_traffic_file_cache(logs_dir: Path, files: dict[str, Any]) -> None:
+    path = logs_dir / _TRAFFIC_TOTALS_CACHE_NAME
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(
+            json.dumps({
+                "version": _TRAFFIC_TOTALS_CACHE_VERSION,
+                "files": files,
+            }),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        # Only a speed-up: the totals stay right, the next start re-parses.
+        logger.exception("cannot write traffic cache %s", path)
+
+
 def _calculate_traffic_30d_gb(since: dt.date | None = None) -> dict[str, float]:
-    """Calculate per-server RX+TX traffic for the last 30 days, or from `since` (UTC day)."""
+    """Calculate per-server RX+TX traffic for the last 30 days, or from `since` (UTC day).
+
+    Per-file totals are cached under the file's (size, mtime): today's
+    file, being appended to, and a file rewritten after the fact are
+    re-read; untouched files are not.
+    """
     cutoff = since or dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=30)
     totals_raw: dict[str, float] = {}
+    logs_dir = _LOGS_DIR
 
-    for file_path in _LOGS_DIR.glob("*.csv"):
-        parts = file_path.stem.rsplit("_", 1)
-        if len(parts) != 2:
-            continue
-        safe_name, date_part = parts
-        try:
-            file_date = dt.date.fromisoformat(date_part)
-        except ValueError:
-            continue
-        if file_date < cutoff:
-            continue
-        if file_path.stat().st_size <= 0:
-            continue
+    # The 30-day and month maps are computed from executor threads.
+    with _traffic_file_cache_lock:
+        if _traffic_file_cache["dir"] != str(logs_dir):
+            _traffic_file_cache["dir"] = str(logs_dir)
+            _traffic_file_cache["files"] = _load_traffic_file_cache(logs_dir)
+        cache: dict[str, Any] = _traffic_file_cache["files"]
+        changed = False
+        present: set[str] = set()
 
-        try:
-            rows = _read_traffic_rows(file_path)
-        except (OSError, csv.Error, UnicodeDecodeError):
-            logger.exception(
-                "skipping unreadable traffic log %s", file_path.name,
-            )
-            continue
-
-        # Tracked per server: rows for different servers interleave
-        # within one file, so a shared cursor would measure the wrong gap.
-        last_seen: dict[str, dt.datetime | None] = {}
-        for row_name, rx_raw, tx_raw, row_ts in rows:
-            row_key = (
-                _safe_filename(row_name)
-                if row_name
-                else safe_name
-            )
-            period_sec, parsed = _sample_period_sec(
-                row_ts, last_seen.get(row_key),
-            )
-            last_seen[row_key] = parsed
-            try:
-                rx = float(rx_raw or 0.0)
-            except (TypeError, ValueError):
-                rx = 0.0
-            try:
-                tx = float(tx_raw or 0.0)
-            except (TypeError, ValueError):
-                tx = 0.0
-            if rx <= 0 and tx <= 0:
+        for file_path in logs_dir.glob("*.csv"):
+            parts = file_path.stem.rsplit("_", 1)
+            if len(parts) != 2:
                 continue
-            if period_sec is None:
-                # First sample of a series, or a gap too long to trust.
+            safe_name, date_part = parts
+            try:
+                file_date = dt.date.fromisoformat(date_part)
+            except ValueError:
                 continue
-            row_total = totals_raw.get(row_key, 0.0)
-            period_megabits = (rx + tx) * period_sec
-            period_megabytes = period_megabits / 8.0
-            period_gigabytes = period_megabytes / 1000.0
-            row_total += period_gigabytes
-            totals_raw[row_key] = row_total
+            # Before the cutoff check: the month map's cutoff is later
+            # than the 30-day one and must not evict that map's entries.
+            present.add(file_path.name)
+            if file_date < cutoff:
+                continue
+            stat = file_path.stat()
+            if stat.st_size <= 0:
+                continue
+
+            entry = cache.get(file_path.name)
+            if (
+                entry is None
+                or entry["size"] != stat.st_size
+                or entry["mtime_ns"] != stat.st_mtime_ns
+            ):
+                try:
+                    file_totals = _traffic_file_totals(file_path, safe_name)
+                except (OSError, csv.Error, UnicodeDecodeError):
+                    logger.exception(
+                        "skipping unreadable traffic log %s", file_path.name,
+                    )
+                    if cache.pop(file_path.name, None) is not None:
+                        changed = True
+                    continue
+                entry = {
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "totals": file_totals,
+                }
+                cache[file_path.name] = entry
+                changed = True
+
+            for key, value in entry["totals"].items():
+                totals_raw[key] = totals_raw.get(key, 0.0) + value
+
+        # Rotated or deleted logs must not keep their entries.
+        for fname in list(cache):
+            if fname not in present:
+                del cache[fname]
+                changed = True
+        if changed:
+            _save_traffic_file_cache(logs_dir, cache)
 
     return {
         key: round(value, 3)
