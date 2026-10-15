@@ -228,6 +228,26 @@ if (pend_old or 0) > 0:
 if disk is not None and disk > 85:
     alerts.append({"severity": "bad", "text": f"Диск / заполнен на {disk}% (порог 85%) — docker-кэш"})
 
+# Балансы API — отдельный часовой крон (nanabanana-balances.sh): там нужен код бота
+try:
+    with open(os.path.join(OUT_DIR, "nanabanana-balances.json")) as fh:
+        bal = json.load(fh)
+    bal_age_h = (now - dt.datetime.fromisoformat(bal["generated_at"])).total_seconds() / 3600
+except Exception:
+    bal, bal_age_h = {}, None
+if bal_age_h is not None and bal_age_h > 3:
+    alerts.append({"severity": "warn", "text": f"Балансы API не обновлялись {round(bal_age_h)} ч"})
+for key, label, floor in (("kie_usd", "Баланс kie.ai", 10), ("openrouter_usd", "Баланс OpenRouter", 5),
+                          ("google_usd", "Баланс Google AI", 20)):
+    v = bal.get(key)
+    if v is None:
+        continue
+    low = v < floor
+    kpis.insert(4, {"id": key, "label": label, "value": v, "unit": "$", "state": "warn" if low else "ok",
+                    "hint": f"порог ${floor}" + (" · расчётный: старт минус расход" if key == "google_usd" else "")})
+    if low:
+        alerts.append({"severity": "warn", "text": f"{label}: ${v} — меньше ${floor}, пополнить"})
+
 doc = {"generated_at": now.isoformat(timespec="seconds"), "kpis": kpis, "charts": charts,
        "tables": tables, "alerts": alerts}
 tmp = OUT + ".tmp"
