@@ -539,18 +539,20 @@
     const card = el("section", "card");
     card.id = "traffic";
     const head = el("div", "card-head"), f = el("div", "filters");
-    [["1d", "Сутки"], ["30d", "30 дней"]].forEach(([k, t]) => {
+    const monthLabel = "С 1 " + ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"][new Date().getUTCMonth()];
+    /* с 1-го числа, а не 30 дней: лимиты трафика у хостеров считаются с начала месяца */
+    [["1d", "Сутки"], ["month", monthLabel]].forEach(([k, t]) => {
       const b = el("button", "", t); b.type = "button"; b.setAttribute("aria-pressed", String(trafficPeriod === k));
       b.addEventListener("click", () => { trafficPeriod = k; renderOverview(); });
       f.append(b);
     });
     head.append(el("h2", null, "Трафик по серверам"), f);
     card.append(head);
-    const key = trafficPeriod === "1d" ? "traffic_1d_gb" : "traffic_30d_gb";
+    const key = trafficPeriod === "1d" ? "traffic_1d_gb" : "traffic_month_gb";
     const servers = ((metrics && metrics.servers) || []).filter((s) => s[key] != null).sort((a, b) => (b[key] || 0) - (a[key] || 0));
     if (!servers.length) { card.append(el("p", "muted", "Нет данных о трафике")); return card; }
     const total = servers.reduce((a, s) => a + (s[key] || 0), 0), max = servers[0][key] || 1;
-    card.append(el("div", "muted tr-total", "Всего " + gb(total) + (trafficPeriod === "1d" ? " за сутки" : " за 30 дней") + " · сейчас приём / отдача, Мбит/с"));
+    card.append(el("div", "muted tr-total", "Всего " + gb(total) + (trafficPeriod === "1d" ? " за сутки" : " " + monthLabel.toLowerCase()) + " · сейчас приём / отдача, Мбит/с"));
     const list = el("div", "tr-list");
     servers.forEach((s) => {
       const row = el("a", "tr-row" + (s.status !== "up" ? " down" : ""));
@@ -678,7 +680,7 @@
         stat("RAM", s.ram_total_gb ? Math.round(100 * s.ram_used_gb / s.ram_total_gb) + " %" : "—"),
         stat("Диск", diskPct(s) + " %", {state: diskPct(s) >= 85 ? "warn" : "ok", note: "свободно " + nf(s.disk_free_gb, 1) + " ГБ"}),
         stat("Трафик за сутки", s.traffic_1d_gb != null ? (s.traffic_1d_gb >= 1000 ? nf(s.traffic_1d_gb / 1000, 2) + " ТБ" : Math.round(s.traffic_1d_gb) + " ГБ") : "—",
-          {note: s.traffic_30d_gb != null ? "30 дней: " + (s.traffic_30d_gb >= 1000 ? nf(s.traffic_30d_gb / 1000, 2) + " ТБ" : Math.round(s.traffic_30d_gb) + " ГБ") : ""}));
+          {note: s.traffic_month_gb != null ? "с 1-го числа: " + gb(s.traffic_month_gb) : ""}));
       d.append(st);
     }
     const cpuBox = el("div", "pj-chart"), rxBox = el("div", "pj-chart");

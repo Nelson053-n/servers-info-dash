@@ -113,3 +113,20 @@ def test_server_history_averages_by_hour_and_skips_old_rows(main_module, tmp_pat
     assert h["series"]["cpu"] == [[hour.isoformat(), 20.0]]
     assert h["series"]["rx"] == [[hour.isoformat(), 2.0]]
     assert h["series"]["ram"] == [[hour.isoformat(), 50.0]]
+
+
+def test_month_traffic_counts_only_files_from_the_first_of_the_month(main_module, tmp_path, monkeypatch):
+    import datetime as dt
+    monkeypatch.setattr(main_module, "_LOGS_DIR", tmp_path)
+    main_module._traffic_month_cache.update(month=None, expires_at=None, values={})
+    today = dt.datetime.now(dt.timezone.utc).date()
+    first = today.replace(day=1)
+    before = first - dt.timedelta(days=1)
+    header = "timestamp,name,host,status,uptime_days,ping_ms,cpu_percent,ram_used_gb,ram_total_gb,disk_free_gb,disk_total_gb,rx_mbps,tx_mbps,interface,error"
+    def write(day):
+        rows = [f"{day} 10:00,S,h,up,1,1,1,1,2,1,2,80,0,eth0,", f"{day} 10:01,S,h,up,1,1,1,1,2,1,2,80,0,eth0,"]
+        (tmp_path / f"S_{day.isoformat()}.csv").write_text(header + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    write(first)
+    write(before)  # прошлый месяц — не в счёт
+    one_minute_gb = 80 * 60 / 8 / 1000  # 80 Мбит/с за 60 с
+    assert main_module._get_traffic_month_gb_cached()["S"] == round(one_minute_gb, 3)

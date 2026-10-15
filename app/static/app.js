@@ -17,7 +17,7 @@ const I = {
     col_cpu: "CPU %",
     col_ram: "RAM",
     col_disk: "Диск",
-    col_30d: "30 дней",
+    col_30d: "С 1-го числа",
     col_1d: "За день",
     col_uptime: "Uptime",
     col_iface: "Интерфейс",
@@ -128,7 +128,7 @@ const I = {
     col_cpu: "CPU %",
     col_ram: "RAM",
     col_disk: "Disk",
-    col_30d: "30 days",
+    col_30d: "Month to date",
     col_1d: "1 day",
     col_uptime: "Uptime",
     col_iface: "Interface",
@@ -554,7 +554,7 @@ function rowTemplate(item) {
     '<td>' + fmt(item.rx_mbps, 2) + '</td>' +
     '<td>' + fmt(item.tx_mbps, 2) + '</td>' +
     '<td><span class="traffic-num">' + traffic30dText(item.traffic_1d_gb) + '</span></td>' +
-    '<td><span class="traffic-num">' + traffic30dText(item.traffic_30d_gb) + '</span></td>' +
+    '<td><span class="traffic-num">' + traffic30dText(item.traffic_month_gb) + '</span></td>' +
     actionsCell + '</tr>';
 }
 

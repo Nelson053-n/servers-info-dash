@@ -2007,9 +2007,9 @@ def _sample_period_sec(
     return gap, parsed
 
 
-def _calculate_traffic_30d_gb() -> dict[str, float]:
-    """Calculate per-server RX+TX traffic for the last 30 days."""
-    cutoff = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=30)
+def _calculate_traffic_30d_gb(since: dt.date | None = None) -> dict[str, float]:
+    """Calculate per-server RX+TX traffic for the last 30 days, or from `since` (UTC day)."""
+    cutoff = since or dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=30)
     totals_raw: dict[str, float] = {}
 
     for file_path in _LOGS_DIR.glob("*.csv"):
@@ -2165,6 +2165,26 @@ def _get_traffic_30d_gb_cached() -> dict[str, float]:
     return values
 
 
+_traffic_month_cache: dict[str, Any] = {"month": None, "expires_at": None, "values": {}}
+
+
+def _get_traffic_month_gb_cached() -> dict[str, float]:
+    """Трафик с 1-го числа текущего месяца (UTC) — лимиты хостеров считаются с начала месяца.
+
+    Журналы хранятся _LOG_RETENTION_DAYS = 30 дней, а 31-го числа «сегодня − 30» — это 1-е,
+    так что файл первого дня месяца ещё на месте.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    month = now.date().replace(day=1)
+    expires_at = _traffic_month_cache.get("expires_at")
+    if _traffic_month_cache.get("month") == month and isinstance(expires_at, dt.datetime) and now < expires_at:
+        return _traffic_month_cache["values"]
+    values = _calculate_traffic_30d_gb(since=month)
+    _traffic_month_cache.update(month=month, values=values,
+                                expires_at=now + dt.timedelta(seconds=_TRAFFIC_30D_CACHE_TTL_SEC))
+    return values
+
+
 def _get_traffic_1d_gb_cached() -> dict[str, float]:
     """Return cached 1-day traffic map, recomputing every minute."""
     now = dt.datetime.now(dt.timezone.utc)
@@ -2186,9 +2206,11 @@ def _attach_traffic_30d(
     servers: list[dict[str, Any]],
 ) -> None:
     traffic_map = _get_traffic_30d_gb_cached()
+    month_map = _get_traffic_month_gb_cached()
     for srv in servers:
         safe_name = _safe_filename(srv.get("name", ""))
         srv["traffic_30d_gb"] = traffic_map.get(safe_name, 0.0)
+        srv["traffic_month_gb"] = month_map.get(safe_name, 0.0)
 
 
 def _attach_traffic_1d(
