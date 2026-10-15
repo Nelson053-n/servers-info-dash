@@ -3118,6 +3118,14 @@ async def projects() -> dict[str, Any]:
     return projects_tab.snapshot()
 
 
+@app.get("/api/projects/{project_id}")
+async def project_detail(project_id: str) -> dict[str, Any]:
+    found = projects_tab.detail(project_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return found
+
+
 @app.get("/api/health")
 async def health(response: Response) -> dict[str, Any]:
     """Report collector liveness, not just that HTTP is up.

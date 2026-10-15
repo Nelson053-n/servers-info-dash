@@ -13,9 +13,9 @@ def _row(**kw):
 
 
 def test_site_down_is_bad():
-    state, reasons = projects._state_of(_row(check={"http": None, "ms": 15000, "error": "timeout"}))
+    state, issues = projects._state_of(_row(check={"http": None, "ms": 15000, "error": "timeout"}))
     assert state == "bad"
-    assert "сайт не отвечает" in reasons
+    assert {"severity": "bad", "text": "сайт не отвечает"} in issues
 
 
 def test_healthy_site_is_ok():
@@ -35,32 +35,42 @@ def test_certificate_thresholds():
     assert broken[0] == "bad"
 
 
-def test_stopped_service_is_bad():
-    state, reasons = projects._state_of(_row(summary={"services": {"nb-bot": "inactive", "nb-web": "active"}}))
+def test_project_alerts_set_the_state():
+    doc = {"alerts": [{"severity": "bad", "text": "nb-bot: inactive"}, {"severity": "warn", "text": "диск 86 %"}]}
+    state, issues = projects._state_of(_row(analytics=doc))
     assert state == "bad"
-    assert "nb-bot: inactive" in reasons
+    assert issues == [{"severity": "bad", "text": "nb-bot: inactive"}, {"severity": "warn", "text": "диск 86 %"}]
 
 
-def test_dead_vpn_exit_is_reported():
-    summary = {"rf": [{"label": "ru3", "error": None, "exits_total": 8, "exits_alive": 7}]}
-    state, reasons = projects._state_of(_row(summary=summary))
-    assert state == "warn"
-    assert "ru3: живых выходов 7 из 8" in reasons
+def test_unreachable_analytics_is_a_warning():
+    state, issues = projects._state_of(_row(analytics={"error": "источник ответил HTTP 404"}))
+    assert (state, issues) == ("warn", [{"severity": "warn", "text": "источник ответил HTTP 404"}])
 
 
-def test_file_summary_marks_stale(tmp_path):
+def test_file_analytics_marks_stale_by_generated_at(tmp_path):
     path = tmp_path / "nb.json"
-    path.write_text(json.dumps({"services": {}}), encoding="utf-8")
-    old = time.time() - 3600
-    os.utime(path, (old, old))
-    data = projects.fetch_summary(projects.SummarySource(kind="file", path=str(path), max_age_min=30))
+    old = (projects._now() - projects.dt.timedelta(hours=1)).isoformat()
+    path.write_text(json.dumps({"generated_at": old, "kpis": []}), encoding="utf-8")
+    data = projects.fetch_analytics(projects.SummarySource(kind="file", path=str(path), max_age_min=30))
     assert data["stale"] is True
     assert data["age_min"] >= 59
 
 
-def test_missing_summary_file_is_an_error_not_a_crash(tmp_path):
-    data = projects.fetch_summary(projects.SummarySource(kind="file", path=str(tmp_path / "none.json")))
+def test_missing_analytics_file_is_an_error_not_a_crash(tmp_path):
+    data = projects.fetch_analytics(projects.SummarySource(kind="file", path=str(tmp_path / "none.json")))
     assert "error" in data
+
+
+def test_overview_carries_only_the_first_four_kpis():
+    projects._cache.clear()
+    doc = {"kpis": [{"id": str(i), "label": str(i), "value": i} for i in range(7)],
+           "charts": [{"id": "a", "kind": "bar", "series": []}, {"id": "b", "kind": "line", "series": []}]}
+    projects._cache.update({"projects": [{"id": "x", "analytics": doc}], "tls": [], "ready": True})
+    card = projects.snapshot()["projects"][0]["analytics"]
+    assert [k["id"] for k in card["kpis"]] == ["0", "1", "2", "3"]
+    assert card["spark"]["id"] == "a"
+    assert projects.detail("x")["analytics"] is doc
+    assert projects.detail("nope") is None
 
 
 def test_projects_endpoint_requires_login(main_module):

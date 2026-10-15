@@ -1,21 +1,23 @@
 # Вкладка «Проекты». Рабочая копия — config/projects.yaml (в .gitignore: токены сводок).
 refresh_sec: 300
 projects:
-  - name: OneYear VPN
+  - id: vpn
+    name: OneYear VPN
     stage: В проде
     link: https://panel.example.com
     check_url: https://panel.example.com/api/health
     tls_host: panel.example.com
-    summary:
-      kind: amnpanel                      # GET /api/summary панели, Bearer SUMMARY_API_TOKEN
-      url: https://panel.example.com/api/summary
+    analytics:
+      kind: http                      # GET /api/analytics панели, Bearer SUMMARY_API_TOKEN
+      url: https://panel.example.com/api/analytics
       token: CHANGE_ME
-  - name: Бананоген
+  - id: nanabanana
+    name: Бананоген
     stage: В проде
     link: https://bananagen.example
     check_url: https://bananagen.example/api/health
     tls_host: bananagen.example
-    summary:
+    analytics:
       kind: file                          # пишет deploy/collectors/nanabanana-summary.sh (root-крон)
       path: /var/lib/infodash/projects/nanabanana.json
       max_age_min: 30

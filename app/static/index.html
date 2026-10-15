@@ -166,41 +166,90 @@ tr:last-child td{border-bottom:none}
 .sec-history table{margin:0;border:none;font-size:13px}
 .sec-history th,.sec-history td{padding:5px 8px;font-size:12px}
 /* вкладки и «Проекты» */
-.tabs{display:flex;gap:4px;margin-bottom:8px}
+.tabs{display:flex;gap:4px;margin-bottom:10px}
+.tabs .btn{padding:6px 14px;font-size:14px}
 .tabs .btn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 .pj-off{display:none!important}
-#projectsView{display:grid;gap:10px}
-#projectsView.stale{opacity:.55}
-.pj-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
-.pj-card h2{margin:0 0 8px;font-size:14px;font-weight:600}
-.pj-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr))}
-.pj-tiles{display:grid;gap:6px 12px;grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
-.pj-tile{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--line);padding-top:5px}
-.pj-lbl{font-size:11px;color:var(--muted)}
-.pj-val{font-size:18px;font-variant-numeric:tabular-nums}
-.pj-tile.warn .pj-val{color:#f59e0b}
-.pj-tile.bad .pj-val,.pj-badtext{color:var(--bad)}
-.pj-take{font-size:15px;font-weight:600}
-.pj-take.ok{color:var(--ok)}.pj-take.warn{color:#f59e0b}.pj-take.bad{color:var(--bad)}
-#pjAttention{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:4px;font-size:13px}
-#pjAttention li{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-.pj-pill{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px}
-.pj-pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.wrap.pj-wide-wrap{max-width:1440px}
+#projectsView{display:grid;gap:16px;padding-bottom:32px}
+#projectsView.stale{opacity:.6}
+#projectsView h3{margin:0 0 12px;font-size:15px;font-weight:600;letter-spacing:.01em}
+.pj-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.pj-title{margin:0 0 4px;font-size:26px;font-weight:650;letter-spacing:-.01em}
+.pj-summary{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.pj-summary .pj-pill{font-size:14px}
+.pj-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;min-width:0;position:relative}
+.pj-muted{color:var(--muted);font-size:13px;margin:0}
+.pj-note{margin:-8px 0 10px}
+.pj-pill{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:13px}
+.pj-pill::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--ok);flex-shrink:0}
 .pj-pill.warn::before{background:#f59e0b}.pj-pill.bad::before{background:var(--bad)}
-.pj-muted{color:var(--muted);font-size:12px;margin:0}
+.pj-attention ul{list-style:none;margin:0;padding:0;display:grid;gap:8px;font-size:14px}
+.pj-attention li{display:grid;grid-template-columns:110px minmax(120px,max-content) 1fr;gap:12px;align-items:baseline}
+.pj-link{color:var(--text);font-weight:600;text-decoration:none;border-bottom:1px dashed var(--muted)}
+.pj-link:hover{border-bottom-color:var(--text)}
+/* обзор: карточки проектов */
+.pj-cards{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(min(100%,400px),1fr))}
+a.pj-project{display:flex;flex-direction:column;gap:14px;color:var(--text);text-decoration:none;
+  transition:border-color .15s,transform .15s}
+a.pj-project:hover{border-color:var(--accent);transform:translateY(-1px)}
+a.pj-project:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.pj-project.bad{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+.pj-project-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.pj-project-name{font-size:18px;font-weight:650;margin-bottom:2px}
+.pj-project-kpis{display:grid;grid-template-columns:1fr 1fr;gap:12px 16px}
+.pj-spark-cap{font-size:12px;color:var(--muted);margin-bottom:-8px}
+.pj-spark{height:46px}
+.pj-project-foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+/* плитки */
+.pj-kpis{display:grid;gap:14px 18px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+.pj-kpis-big{gap:16px;grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+.pj-kpis-big .pj-kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+.pj-kpi{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pj-kpi-label{font-size:12px;color:var(--muted);line-height:1.3}
+.pj-kpi-value{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15;overflow-wrap:anywhere}
+.pj-kpi.big .pj-kpi-value{font-size:30px}
+.pj-kpi.warn .pj-kpi-value{color:#f59e0b}
+.pj-kpi.bad .pj-kpi-value{color:var(--bad)}
+.pj-delta{font-size:12px;background:none}.pj-delta.pj-up{color:var(--ok)}.pj-delta.pj-down{color:var(--bad)}
+/* графики */
+.pj-charts{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(min(100%,560px),1fr))}
+.pj-chart{position:relative;min-height:220px}
+.pj-grid{stroke:var(--line);stroke-width:1}
+.pj-axis{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.pj-cursor{stroke:var(--muted);stroke-dasharray:3 3}
+.pj-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
+.pj-legend span{display:inline-flex;align-items:center;gap:6px}
+.pj-legend i,.pj-tip i{display:inline-block;width:10px;height:10px;border-radius:3px}
+.pj-tip{position:absolute;z-index:5;pointer-events:none;background:var(--bg);border:1px solid var(--line);
+  border-radius:10px;padding:8px 10px;font-size:12px;box-shadow:0 6px 20px rgba(0,0,0,.25);min-width:140px}
+.pj-tip-x{color:var(--muted);margin-bottom:4px}
+.pj-tip-row{display:grid;grid-template-columns:12px 1fr auto;gap:6px;align-items:center}
+.pj-tip-row b{font-variant-numeric:tabular-nums}
+.pj-tip-sum{display:block;margin-top:4px;color:var(--muted)}
+/* таблицы */
 .pj-scroll{overflow-x:auto}
-.pj-table{width:100%;border-collapse:collapse;font-size:13px}
-.pj-table th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:4px 6px;border-bottom:1px solid var(--line)}
-.pj-table td{padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
-.pj-table a{color:var(--text)}
+.pj-table{width:100%;border-collapse:collapse;font-size:14px}
+.pj-table th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.pj-table td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+.pj-table tr:last-child td{border-bottom:none}
 .pj-table .num,.pj-tls .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-.pj-tls{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) 60px;gap:8px;align-items:center;font-size:12px;padding:2px 0}
+.pj-two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))}
+.pj-two .btn{margin-top:14px}
+.pj-tls{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13px;padding:4px 0}
 .pj-host{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pj-bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}
-.pj-bar i{display:block;height:100%;background:var(--muted);border-radius:3px}
+.pj-bar{height:7px;border-radius:4px;background:var(--line);overflow:hidden}
+.pj-bar i{display:block;height:100%;background:var(--muted);border-radius:4px}
 .pj-tls.warn .pj-bar i{background:#f59e0b}.pj-tls.bad .pj-bar i{background:var(--bad)}
 .pj-tls.bad .num{color:var(--bad)}
-@media (max-width:700px){.pj-narrow{display:none}}
+.pj-back{color:var(--muted);text-decoration:none;font-size:14px;width:max-content}
+.pj-back:hover{color:var(--text)}
+@media (max-width:640px){
+  .pj-attention li{grid-template-columns:1fr}
+  .pj-title{font-size:22px}
+  .pj-kpi.big .pj-kpi-value{font-size:24px}
+}
+@media (prefers-reduced-motion:reduce){a.pj-project{transition:none}a.pj-project:hover{transform:none}}
 </style>
 </head>
 <body>
@@ -349,31 +398,7 @@ tr:last-child td{border-bottom:none}
     </thead>
     <tbody id="rows"></tbody>
   </table>
-  <section id="projectsView" class="hidden">
-    <div class="pj-card">
-      <div class="pj-take" id="pjTakeaway">—</div>
-      <div class="pj-muted" id="pjMeta"></div>
-      <ul id="pjAttention"></ul>
-    </div>
-    <div class="pj-grid">
-      <div class="pj-card"><h2>OneYear VPN</h2><div class="pj-tiles" id="pjVpn"></div></div>
-      <div class="pj-card"><h2>Бананоген</h2><div class="pj-tiles" id="pjNb"></div></div>
-      <div class="pj-card"><h2>Серверы</h2><div class="pj-tiles" id="pjServers"></div></div>
-    </div>
-    <div class="pj-grid">
-      <div class="pj-card">
-        <h2>Проекты</h2>
-        <div class="pj-scroll">
-          <table class="pj-table">
-            <thead><tr><th>Проект</th><th>Статус</th><th class="pj-narrow">Стадия</th><th class="num">HTTP</th>
-              <th class="num pj-narrow">мс</th><th class="num">TLS</th><th class="pj-narrow">Замечания</th></tr></thead>
-            <tbody id="pjRows"></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="pj-card"><h2>TLS-сертификаты</h2><div id="pjTls"></div></div>
-    </div>
-  </section>
+  <section id="projectsView" class="hidden" aria-live="polite"></section>
 </div>
 
 <!-- login overlay (hidden by default) -->
@@ -402,6 +427,6 @@ tr:last-child td{border-bottom:none}
 </div>
 
 <script src="/static/app.js?v=20260905d"></script>
-<script src="/static/projects.js?v=20261015a"></script>
+<script src="/static/projects.js?v=20261015c"></script>
 </body>
 </html>
