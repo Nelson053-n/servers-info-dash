@@ -3182,6 +3182,56 @@ def _csv_cell(value: Any) -> Any:
     return value
 
 
+def _server_history(server_name: str, hours: int) -> dict[str, Any]:
+    """Почасовые средние CPU/RAM/трафика за последние `hours` часов из CSV-журналов.
+
+    Журналы пишутся по дням UTC, поэтому читаются только файлы, которые
+    могут пересекаться с окном — не весь 30-дневный архив, как /api/logs.
+    """
+    safe = _safe_filename(server_name)
+    now = dt.datetime.now(dt.timezone.utc)
+    start = now - dt.timedelta(hours=hours)
+    day = start.date()
+    buckets: dict[str, dict[str, list[float]]] = {}
+    while day <= now.date():
+        fp = _LOGS_DIR / f"{safe}_{day.isoformat()}.csv"
+        day += dt.timedelta(days=1)
+        if not fp.exists():
+            continue
+        try:
+            with fp.open(encoding="utf-8", newline="") as fh:
+                for row in csv.DictReader(fh):
+                    try:
+                        ts = dt.datetime.strptime(row.get("timestamp", ""), "%Y-%m-%d %H:%M").replace(tzinfo=dt.timezone.utc)
+                    except ValueError:
+                        continue
+                    if ts < start:
+                        continue
+                    hour = ts.replace(minute=0).isoformat()
+                    b = buckets.setdefault(hour, {"cpu": [], "ram": [], "rx": [], "tx": []})
+                    for key, col in (("cpu", "cpu_percent"), ("rx", "rx_mbps"), ("tx", "tx_mbps")):
+                        try:
+                            b[key].append(float(row[col]))
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                    try:
+                        b["ram"].append(100 * float(row["ram_used_gb"]) / float(row["ram_total_gb"]))
+                    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                        pass
+        except csv.Error:
+            logger.warning("skipping unreadable log %s", fp, exc_info=True)
+    hours_sorted = sorted(buckets)
+    avg = lambda xs: round(sum(xs) / len(xs), 1) if xs else None  # noqa: E731
+    series = {k: [[h, avg(buckets[h][k])] for h in hours_sorted if buckets[h][k]] for k in ("cpu", "ram", "rx", "tx")}
+    return {"server": server_name, "hours": hours, "series": series}
+
+
+@app.get("/api/history/{server_name}")
+async def server_history(server_name: str, hours: int = 24) -> dict[str, Any]:
+    hours = max(1, min(hours, 24 * 7))
+    return await asyncio.to_thread(_server_history, server_name, hours)
+
+
 @app.get("/api/logs/{server_name}")
 async def download_logs(server_name: str) -> StreamingResponse:
     """Download combined CSV log for the given server."""

@@ -7,7 +7,7 @@
   const SVG = "http://www.w3.org/2000/svg";
   const STATE = {ok: "норма", warn: "замечания", bad: "проблема"};
   const SEV = {bad: "Срочно", warn: "Проверить"};
-  let overview = null, metrics = null, current = {view: "overview", id: null}, timer = null, projFilter = "all", retrying = false;
+  let overview = null, metrics = null, current = {view: "overview", id: null}, timer = null, projFilter = "all", retrying = false, details = {};
 
   /* ---------- утилиты ---------- */
   const $ = (id) => document.getElementById(id);
@@ -200,31 +200,6 @@
     if (p.tls) parts.push(p.tls.error ? "TLS: ошибка" : "TLS " + p.tls.days_left + " дн");
     return parts.join(" · ");
   }
-  function attentionItems() {
-    const items = [];
-    (overview && overview.projects || []).forEach((p) => p.issues.forEach((r) => items.push({sev: r.severity, where: p.name, what: r.text, href: "#projects/" + p.id})));
-    (metrics && metrics.servers || []).forEach((s) => {
-      if (s.status !== "up") items.push({sev: "bad", where: "Серверы", what: s.name + ": нет связи", href: "#servers"});
-      else if (diskPct(s) >= 85) items.push({sev: "warn", where: "Серверы", what: s.name + ": диск занят на " + diskPct(s) + " %", href: "#servers"});
-    });
-    return items.sort((a, b) => (a.sev === "bad" ? 0 : 1) - (b.sev === "bad" ? 0 : 1));
-  }
-  function attentionCard(items, title) {
-    const card = el("section", "card attn");
-    const head = el("div", "card-head");
-    const nBad = items.filter((i) => i.sev === "bad").length;
-    head.append(el("h2", null, title || "Требует внимания"), el("span", "muted", items.length ? `${nBad} срочно · ${items.length - nBad} проверить` : ""));
-    card.append(head);
-    if (!items.length) { card.append(el("div", "attn-empty", "Всё в норме")); return card; }
-    items.forEach((it) => {
-      const row = el("div", "attn-row");
-      const open = el("a", null, "Открыть"); open.href = it.href || "#overview";
-      row.append(el("span", null), el("span", "where", it.where), el("span", "what", it.what), open);
-      row.firstChild.append(chip(it.sev, SEV[it.sev]));
-      card.append(row);
-    });
-    return card;
-  }
   function projectCard(p) {
     const a = p.analytics;
     const card = el("a", "pcard " + p.state);
@@ -296,34 +271,6 @@
     }
     return card;
   }
-  function heatCard() {
-    const card = el("section", "card");
-    const head = el("div", "card-head");
-    const a = el("a", null, "Все серверы"); a.href = "#servers";
-    head.append(el("h2", null, "Серверы — нагрузка сейчас"), a);
-    card.append(head);
-    const heat = el("div", "heat");
-    (metrics && metrics.servers || []).forEach((s) => {
-      const t = el("a");
-      t.href = "#servers";
-      let cls = "";
-      if (s.status !== "up") cls = "bad";
-      else if (diskPct(s) >= 85) cls = "warn";
-      else if ((s.cpu_percent || 0) >= 60) cls = "l3";
-      else if ((s.cpu_percent || 0) >= 20) cls = "l2";
-      t.className = cls;
-      t.textContent = s.name;
-      t.title = s.name + (s.status === "up" ? ` · CPU ${Math.round(s.cpu_percent || 0)} % · диск ${diskPct(s)} %` : " · нет связи");
-      heat.append(t);
-    });
-    card.append(heat);
-    const lg = el("div", "legend");
-    [["до 20 % CPU", "color-mix(in srgb,var(--accent) 10%,var(--panel2))"], ["20–60 %", "color-mix(in srgb,var(--accent) 26%,var(--panel2))"],
-     ["от 60 %", "color-mix(in srgb,var(--accent) 45%,var(--panel2))"], ["диск от 85 %", "color-mix(in srgb,var(--warn) 24%,var(--panel2))"],
-     ["нет связи", "color-mix(in srgb,var(--bad) 22%,var(--panel2))"]].forEach(([t, c]) => { const s = el("span"); const i = el("i"); i.style.background = c; s.append(i, document.createTextNode(t)); lg.append(s); });
-    card.append(lg);
-    return card;
-  }
   function viewHead(eyebrow, title, right) {
     const h = el("div", "view-head"), l = el("div");
     l.append(el("div", "eyebrow", eyebrow), el("h1", "view-title", title));
@@ -335,39 +282,445 @@
     ? "обновлено " + new Date(overview.generated_at).toLocaleString("ru-RU", {day: "numeric", month: "long", hour: "2-digit", minute: "2-digit"})
     : "";
 
-  /* ---------- Обзор ---------- */
+  /* ---------- связанные выводы ---------- */
+  const plural = (n, one, few, many) => {
+    const a = Math.abs(n) % 100, b = a % 10;
+    return a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many;
+  };
+  const SNOOZE_KEY = "info.snooze";
+  function snoozed() {
+    try { const s = JSON.parse(localStorage.getItem(SNOOZE_KEY) || "{}"); const now = Date.now(); return Object.fromEntries(Object.entries(s).filter(([, t]) => t > now)); }
+    catch (e) { return {}; }
+  }
+  function snooze(key) {
+    try { const s = snoozed(); s[key] = Date.now() + 24 * 3600 * 1000; localStorage.setItem(SNOOZE_KEY, JSON.stringify(s)); }
+    catch (e) { /* приватный режим: отложить не получится, пункт останется */ }
+  }
+  /* Все матрицы связности из подробных документов проектов (сейчас — OneYear VPN). */
+  const allMatrices = () => Object.values(details).flatMap((d) => (d && d.analytics && d.analytics.matrices) || []);
+  /* Живые VPN-выходы через сервер с таким именем: «up0 · Финляндия · 15 мс» → {exit, ping, copy}. */
+  function liveExitsVia(name) {
+    const out = [];
+    allMatrices().forEach((mx) => (mx.rows || []).forEach((r) => (r.cells || []).forEach((c) => {
+      const parts = String(c.title || "").split(" · ");
+      if (c.state === "ok" && parts[1] === name) {
+        const ping = (parts[2] || "").match(/(\d+)\s*мс/);
+        out.push({exit: parts[0], copy: r.label, ping: ping ? Number(ping[1]) : null});
+      }
+    })));
+    return out;
+  }
+  function insights() {
+    const items = [];
+    (metrics && metrics.servers || []).forEach((s) => {
+      const href = "#servers/" + encodeURIComponent(s.name);
+      if (s.status !== "up") {
+        const exits = liveExitsVia(s.name);
+        let text = "Мониторинг не получает данные по SSH.";
+        if (exits.length) {
+          const best = exits.filter((e) => e.ping != null).sort((a, b) => a.ping - b.ping)[0] || exits[0];
+          text = `VPN-выход ${best.exit} через этот сервер при этом жив` + (best.ping != null ? `: пинг ${best.ping} мс с ${best.copy}` : "") +
+            ". Клиенты не страдают — не работает канал мониторинга.";
+        }
+        items.push({key: "srv-down:" + s.name, sev: "bad", title: s.name + ": SSH не отвечает", text, src: "серверы", href, kind: "server"});
+      } else if (diskPct(s) >= 85) {
+        items.push({key: "srv-disk:" + s.name, sev: "warn", title: `${s.name}: диск ${diskPct(s)} %`, text: `Свободно ${nf(s.disk_free_gb, 1)} ГБ из ${nf(s.disk_total_gb, 1)}.`, src: "серверы", href, kind: "server"});
+      }
+    });
+    (overview && overview.projects || []).forEach((p) => p.issues.forEach((r) => {
+      /* сроки сертификатов собираем ниже одним пунктом на дату */
+      if (/^сертификат истекает/.test(r.text)) return;
+      items.push({key: "prj:" + p.id + ":" + r.text, sev: r.severity, title: r.text, text: "", src: p.name, href: "#projects/" + p.id, kind: "project"});
+    }));
+    const byDate = {};
+    allCerts().forEach((c) => {
+      const st = certState(c);
+      if (st === "ok") return;
+      const k = c.error ? "ошибка" : c.expires;
+      (byDate[k] = byDate[k] || {st, days: c.days_left, hosts: [], error: c.error}).hosts.push(c.host);
+    });
+    Object.entries(byDate).forEach(([date, g]) => {
+      const n = g.hosts.length;
+      items.push({key: "tls:" + date, sev: g.st, kind: "tls", src: "сертификаты", href: "#tls",
+        title: g.error ? `${n} ${plural(n, "сертификат", "сертификата", "сертификатов")} не проверяется` :
+          `${n} ${plural(n, "сертификат истекает", "сертификата истекают", "сертификатов истекают")} ${dm(date)}`,
+        text: g.hosts.join(", ") + (g.error ? "" : ` — через ${g.days} ${plural(g.days, "день", "дня", "дней")}. Проверить автопродление.`)});
+    });
+    return items.sort((a, b) => (a.sev === "bad" ? 0 : 1) - (b.sev === "bad" ? 0 : 1));
+  }
+  function headline(items) {
+    const bad = items.filter((i) => i.sev === "bad"), warn = items.filter((i) => i.sev !== "bad");
+    const parts = [];
+    const srv = bad.filter((i) => i.kind === "server").length, prj = bad.filter((i) => i.kind === "project").length, tls = bad.filter((i) => i.kind === "tls").length;
+    if (srv) parts.push(`${srv} ${plural(srv, "сервера", "серверов", "серверов")}`);
+    if (prj) parts.push(`${prj} ${plural(prj, "проблемы в проекте", "проблем в проектах", "проблем в проектах")}`);
+    if (tls) parts.push("сертификатов");
+    const h = el("h1", "headline");
+    if (parts.length) { h.append(document.createTextNode("Всё работает, кроме "), el("span", "hl-bad", parts.join(" и ")), document.createTextNode(".")); }
+    else h.append(document.createTextNode("Всё работает."));
+    if (warn.length) { h.append(el("br")); h.append(el("span", "hl-sub", `${warn.length === 1 ? "Ещё 1 пункт" : `Ещё ${warn.length} ${plural(warn.length, "пункт", "пункта", "пунктов")}`} стоит проверить.`)); }
+    else if (!parts.length) { h.append(el("br")); h.append(el("span", "hl-sub", "Замечаний нет.")); }
+    return h;
+  }
+  function attentionV2(items) {
+    const card = el("section", "card attn2");
+    const head = el("div", "card-head");
+    head.append(el("h2", null, "Требует внимания"), el("span", "muted", "с учётом всех источников"));
+    card.append(head);
+    const hidden = snoozed();
+    const shown = items.filter((i) => !hidden[i.key]);
+    if (!shown.length) card.append(el("div", "attn-empty", items.length ? "Всё отложенное — на сутки" : "Всё в норме"));
+    shown.forEach((it) => {
+      const row = el("div", "ins");
+      row.append(el("span", "ins-dot " + it.sev));
+      const body = el("div", "ins-body"), top = el("div", "ins-top");
+      top.append(el("b", null, it.title), el("span", "ins-src", it.src));
+      body.append(top);
+      if (it.text) body.append(el("div", "ins-text", it.text));
+      const acts = el("div", "ins-acts");
+      const open = el("a", "btn small", it.kind === "server" ? "Открыть сервер" : "Открыть"); open.href = it.href;
+      const later = el("button", "btn small ghost", "Отложить на сутки"); later.type = "button";
+      later.addEventListener("click", () => { snooze(it.key); renderOverview(); renderRail(); });
+      acts.append(open, later);
+      body.append(acts);
+      row.append(body);
+      card.append(row);
+    });
+    const nHidden = items.length - shown.length;
+    if (nHidden) {
+      const b = el("button", "btn small ghost ins-more", `Отложено: ${nHidden} — показать`); b.type = "button";
+      b.addEventListener("click", () => { try { localStorage.removeItem(SNOOZE_KEY); } catch (e) { /* ничего */ } renderOverview(); });
+      card.append(b);
+    }
+    return card;
+  }
+
+  /* ---------- доход по месяцам ---------- */
+  function moneyCards() {
+    const out = [];
+    Object.values(details).forEach((d) => {
+      const a = d && d.analytics;
+      const k = a && (a.kpis || []).find((x) => x.id === "revenue_month");
+      if (!k) return;
+      const prev = (a.kpis || []).find((x) => x.id === "revenue_prev_month");
+      const chart = (a.charts || []).find((c) => c.id === "revenue_monthly");
+      const card = el("section", "card money");
+      card.id = "money";
+      const head = el("div", "card-head"); head.append(el("h2", null, d.name + " — доход"), el("span", "muted", "только оплаты в рублях"));
+      card.append(head);
+      const row = el("div", "money-row");
+      const main = el("div"); main.append(el("div", "stat-label", k.label), el("div", "money-value", fmtValue(k.value, k.unit)));
+      row.append(main);
+      if (typeof k.delta === "number") {
+        const d2 = el("div", "money-delta");
+        d2.append(el("div", k.delta >= 0 ? "pos" : "neg", (k.delta >= 0 ? "▲ +" : "▼ ") + nf(k.delta, 1) + " % " + (k.delta_label || "")));
+        row.append(d2);
+      }
+      if (prev) { const p = el("div"); p.append(el("div", "stat-label", prev.label), el("div", "money-prev", fmtValue(prev.value, prev.unit))); row.append(p); }
+      card.append(row);
+      if (chart) { const box = el("div", "pj-chart money-chart"); card.append(box); requestAnimationFrame(() => drawChart(box, chart)); }
+      out.push(card);
+    });
+    return out;
+  }
+
+  /* ---------- матрица связности с пингом ---------- */
+  function matrixGrid(mx, serversRows) {
+    const cols = mx.columns || [];
+    const country = {};
+    (serversRows || []).forEach((s) => { if (s.name && s.country) country[s.name] = s.country; });
+    /* подпись колонки — страна ноды-выхода (FI, FI2…), имя ноды берём из подсказок клеток */
+    const seen = {};
+    const heads = cols.map((c, i) => {
+      let node = null;
+      (mx.rows || []).forEach((r) => { const t = String(((r.cells || [])[i] || {}).title || "").split(" · "); if (!node && t[1] && !/выключен|нет на этой|не ответила/.test(t[1])) node = t[1]; });
+      if (!node) return {label: c, title: c};
+      const cc = country[node] && country[node] !== "—" ? country[node] : node.slice(0, 3);
+      seen[cc] = (seen[cc] || 0) + 1;
+      return {label: seen[cc] > 1 ? cc + seen[cc] : cc, title: c + " · " + node};
+    });
+    const grid = el("div", "matrix ping");
+    grid.style.gridTemplateColumns = `48px repeat(${cols.length}, minmax(30px, 1fr)) auto`;
+    grid.append(el("span"));
+    heads.forEach((h) => { const s = el("span", "mh", h.label); s.title = h.title; grid.append(s); });
+    grid.append(el("span", "mh", ""));
+    (mx.rows || []).forEach((r) => {
+      grid.append(el("span", "mr", r.label));
+      (r.cells || []).forEach((c) => {
+        const ping = String(c.title || "").match(/(\d+)\s*мс/);
+        let cls = "mc", txt = "";
+        if (c.state === "ok") { const p = ping ? Number(ping[1]) : null; txt = p != null ? String(p) : "ок"; cls += p != null && p >= 40 ? " slow" : ""; }
+        else if (c.state === "bad") { cls += " bad"; txt = "нет"; }
+        else { cls += " off"; txt = /выключен/.test(c.title || "") ? "выкл" : "—"; }
+        const cell = el("span", cls, txt); cell.title = c.title || ""; grid.append(cell);
+      });
+      grid.append(el("span", "mv", r.value || ""));
+    });
+    return grid;
+  }
+  function matrixLegend() {
+    const lg = el("div", "legend");
+    [["до 40 мс", "color-mix(in srgb,var(--ok) 28%,transparent)"], ["40 мс и больше", "color-mix(in srgb,var(--warn) 24%,transparent)"],
+     ["не отвечает", "color-mix(in srgb,var(--bad) 55%,transparent)"], ["выключен или нет на копии", "transparent"]].forEach(([t, c], i) => {
+      const s = el("span"), sw = el("i"); sw.style.background = c; if (i === 3) sw.style.border = "1px dashed var(--muted)"; s.append(sw, document.createTextNode(t)); lg.append(s);
+    });
+    return lg;
+  }
+  function matrixCard(mx, serversRows) {
+    const card = el("section", "card");
+    const head = el("div", "card-head"); head.append(el("h2", null, mx.title)); head.append(el("span", "muted", "пинг, мс" + (mx.note ? " · " + mx.note : "")));
+    card.append(head, matrixGrid(mx, serversRows), matrixLegend());
+    return card;
+  }
+  const serversTableOf = (an) => ((an && an.tables) || []).find((t) => t.id === "servers");
+
+  /* ---------- проекты плотным списком ---------- */
+  let listSort = "issues";
+  function projectList() {
+    const card = el("section", "card tcard");
+    card.id = "projects-list";
+    const head = el("div", "card-head");
+    const f = el("div", "filters");
+    [["issues", "Сначала проблемы"], ["money", "По доходу"]].forEach(([k, t]) => {
+      const b = el("button", "", t); b.type = "button"; b.setAttribute("aria-pressed", String(listSort === k));
+      b.addEventListener("click", () => { listSort = k; renderOverview(); });
+      f.append(b);
+    });
+    head.append(el("h2", null, "Проекты"), f);
+    card.append(head);
+    const order = {bad: 0, warn: 1, ok: 2};
+    const money = (p) => { const k = ((p.analytics && p.analytics.kpis) || []).find((x) => x.unit === "₽" || x.unit === "$"); return k && typeof k.value === "number" ? (k.unit === "$" ? k.value * 80 : k.value) : -1; };
+    const ps = overview.projects.slice().sort(listSort === "money" ? (a, b) => money(b) - money(a) : (a, b) => order[a.state] - order[b.state]);
+    const wrap = el("div", "tscroll"), list = el("div", "plist");
+    ["", "Проект", "Главное", "Деньги", "Ещё", "Динамика", "Сайт · TLS"].forEach((t, i) => list.append(el("span", "ph" + (i === 6 ? " r" : ""), t)));
+    ps.forEach((p) => {
+      const ks = (p.analytics && p.analytics.kpis) || [];
+      const moneyK = ks.find((x) => x.unit === "₽" || x.unit === "$");
+      const rest = ks.filter((x) => x !== moneyK);
+      const cell = (k) => {
+        const s = el("span", "pc");
+        if (!k) { s.append(el("span", "faint", "—")); return s; }
+        const txt = fmtValue(k.value, k.unit);
+        s.append(el("span", isLong(txt) ? "" : "mono", txt), el("span", "pl", " " + k.label.toLowerCase()));
+        if (typeof k.delta === "number") s.append(el("span", k.delta >= 0 ? "pos" : "neg", " " + (k.delta >= 0 ? "+" : "") + nf(k.delta, 1) + " %"));
+        return s;
+      };
+      const dot = el("span", "pc"); dot.append(el("span", "sdot " + p.state));
+      const name = el("a", "pc pname"); name.href = "#projects/" + p.id;
+      name.append(el("b", null, p.name), el("br"), el("span", "pl", p.stage || ""));
+      const spark = el("span", "pc pspark");
+      if (p.analytics && p.analytics.spark) requestAnimationFrame(() => drawChart(spark, p.analytics.spark, {spark: true}));
+      else spark.append(el("span", "faint", p.analytics && p.analytics.error ? "нет данных" : "—"));
+      list.append(dot, name, cell(rest[0]), cell(moneyK), cell(rest[1]), spark, el("span", "pc r mono pl", siteLine(p)));
+    });
+    wrap.append(list); card.append(wrap);
+    return card;
+  }
+
+  /* ---------- серверы по ролям ---------- */
+  function rolesCard() {
+    const card = el("section", "card");
+    const head = el("div", "card-head"); const a = el("a", null, "Таблица"); a.href = "#servers";
+    head.append(el("h2", null, "Серверы по ролям"), a);
+    card.append(head);
+    const servers = (metrics && metrics.servers) || [];
+    const groups = (overview && overview.server_groups && overview.server_groups.length) ? overview.server_groups : [{title: "Все", servers: servers.map((s) => s.name)}];
+    const used = new Set();
+    const rows = groups.map((g) => ({title: g.title, list: (g.servers || []).map((n) => servers.find((s) => s.name === n)).filter(Boolean)}));
+    rows.forEach((r) => r.list.forEach((s) => used.add(s.name)));
+    const rest = servers.filter((s) => !used.has(s.name));
+    if (rest.length) rows.push({title: "Прочие", list: rest});
+    rows.forEach((r) => {
+      if (!r.list.length) return;
+      const line = el("div", "role-row");
+      line.append(el("span", "muted", r.title));
+      const tiles = el("div", "heat");
+      r.list.forEach((s) => {
+        const t = el("a"); t.href = "#servers/" + encodeURIComponent(s.name);
+        let cls = "";
+        if (s.status !== "up") cls = "bad"; else if (diskPct(s) >= 85) cls = "warn"; else if ((s.cpu_percent || 0) >= 60) cls = "l3"; else if ((s.cpu_percent || 0) >= 20) cls = "l2";
+        t.className = cls;
+        t.textContent = s.name + (s.status === "up" ? " · " + Math.round(s.cpu_percent || 0) + " %" : "");
+        t.title = s.name + (s.status === "up" ? ` · CPU ${Math.round(s.cpu_percent || 0)} % · диск ${diskPct(s)} %` : " · нет связи");
+        tiles.append(t);
+      });
+      line.append(tiles);
+      card.append(line);
+    });
+    return card;
+  }
+
+  /* ---------- Обзор (v2) ---------- */
   function renderOverview() {
     const v = $("overviewView");
     v.textContent = "";
     if (!overview || !overview.ready) { v.append(el("p", "muted", "Сбор данных…")); return; }
-    v.append(viewHead(updated(), "Обзор"));
-    const ps = overview.projects, servers = (metrics && metrics.servers) || [];
-    const okP = ps.filter((p) => p.state === "ok").length, warnP = ps.filter((p) => p.state !== "ok").length;
+    const items = insights();
+    const servers = (metrics && metrics.servers) || [];
+    const ps = overview.projects;
+    const top = el("section", "hero");
+    const left = el("div");
+    left.append(el("div", "eyebrow", new Date().toLocaleDateString("ru-RU", {weekday: "long", day: "numeric", month: "long"}) + " · " + updated()), headline(items));
+    const pills = el("div", "hero-pills");
+    const pill = (label, val, of, st) => { const p = el("div", "hero-pill" + (st && st !== "ok" ? " " + st : "")); p.append(el("div", "stat-label", label)); const b = el("div", "mono hp-v", String(val)); if (of != null) b.append(el("small", null, "/" + of)); p.append(b); return p; };
+    pills.append(pill("проекты", ps.filter((p) => p.state === "ok").length, ps.length, ps.some((p) => p.state === "bad") ? "bad" : ps.some((p) => p.state === "warn") ? "warn" : "ok"));
     const up = servers.filter((s) => s.status === "up").length;
-    const down = servers.filter((s) => s.status !== "up");
-    const rev = ps.filter((p) => p.analytics && typeof p.analytics.revenue_30d === "number");
-    const revSum = rev.reduce((a, p) => a + p.analytics.revenue_30d, 0);
-    const cert = allCerts()[0];
-    const stats = el("section", "stats big");
-    stats.setAttribute("aria-label", "Сводка");
-    stats.append(
-      stat("Проекты в норме", String(okP), {of: ps.length, note: warnP ? warnP + " с замечаниями" : "все в норме", noteCls: warnP ? "neg" : "pos"}),
-      stat("Серверы на связи", String(up), {of: servers.length, state: down.length ? "bad" : "ok", note: down.length ? down.map((s) => s.name).join(", ") : "все отвечают"}),
-      stat("Выручка за 30 дней", fmtValue(revSum, "₽"), {note: rev.map((p) => p.name + " " + fmtValue(p.analytics.revenue_30d, "")).join(" · ")}),
-      stat("Ближайший сертификат", cert ? (cert.error ? "ошибка" : cert.days_left + " дн") : "—", {state: cert ? certState(cert) : "ok", note: cert ? cert.host : ""}),
-    );
-    v.append(stats, attentionCard(attentionItems()));
-    const ph = el("div", "view-head"), pt = el("h2", "view-title", "Проекты");
-    pt.style.fontSize = "18px";
-    const all = el("a", null, "Все проекты"); all.href = "#projects";
-    ph.append(pt, all);
-    const grid = el("div", "pcards");
-    const order = {bad: 0, warn: 1, ok: 2};
-    ps.slice().sort((a, b) => order[a.state] - order[b.state]).forEach((p) => grid.append(projectCard(p)));
+    pills.append(pill("серверы", up, servers.length, up < servers.length ? "bad" : "ok"));
+    const exitsK = Object.values(details).map((d) => ((d && d.analytics && d.analytics.kpis) || []).find((k) => k.id === "rf_exits")).find(Boolean);
+    if (exitsK) { const [a, b] = String(exitsK.value).split("/").map((x) => x.trim()); pills.append(pill("выходы VPN", a, b, exitsK.state)); }
+    top.append(left, pills);
+    v.append(top);
+
+    const grid = el("div", "grid2 top");
+    grid.append(attentionV2(items));
+    const right = el("div", "col");
+    moneyCards().forEach((c) => right.append(c));
+    Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => right.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
+    if (right.childNodes.length) grid.append(right);
+    v.append(grid, projectList());
     const bottom = el("div", "grid2");
-    bottom.append(heatCard(), certCard(false));
-    v.append(ph, grid, bottom);
+    bottom.append(rolesCard(), certCard(false));
+    v.append(bottom);
   }
+
+  /* ---------- карточка сервера ---------- */
+  let drawerFor = null, drawerHasData = false;
+  async function openDrawer(name) {
+    drawerFor = name;
+    let d = $("srvDrawer");
+    if (!d) {
+      d = el("aside", "drawer");
+      d.id = "srvDrawer";
+      d.setAttribute("role", "dialog");
+      document.body.append(d);
+      const shade = el("div", "drawer-shade"); shade.id = "srvShade";
+      shade.addEventListener("click", closeDrawer);
+      document.body.append(shade);
+    }
+    $("srvShade").classList.remove("hidden");
+    d.classList.remove("hidden");
+    d.setAttribute("aria-label", "Сервер " + name);
+    const s = ((metrics && metrics.servers) || []).find((x) => x.name === name);
+    /* по прямой ссылке карточка открывается раньше, чем пришли метрики — тогда paint() перерисует её ещё раз */
+    drawerHasData = !!s;
+    d.textContent = "";
+    const head = el("div", "drawer-head"), hl = el("div");
+    const grp = ((overview && overview.server_groups) || []).find((g) => (g.servers || []).includes(name));
+    hl.append(el("div", "eyebrow", (grp ? grp.title : "Сервер") + (s && s.host ? " · " + s.host : "")), el("h2", "drawer-title", name));
+    const meta = el("div", "drawer-meta");
+    if (s) {
+      meta.append(chip(s.status === "up" ? "ok" : "bad", s.status === "up" ? "работает" : "нет связи по SSH"));
+      if (s.status === "up") meta.append(el("span", "mono muted", `аптайм ${nf(s.uptime_days, 1)} дн · пинг ${nf(s.ping_ms, 0)} мс`));
+    }
+    hl.append(meta);
+    const close = el("button", "btn small", "Закрыть"); close.type = "button"; close.addEventListener("click", closeDrawer);
+    head.append(hl, close);
+    d.append(head);
+    if (s && s.status !== "up") {
+      const exits = liveExitsVia(name);
+      d.append(el("div", "issue bad", exits.length
+        ? `SSH не отвечает, но VPN-выходы через сервер живы: ${exits.map((e) => `${e.exit} с ${e.copy}${e.ping != null ? " · " + e.ping + " мс" : ""}`).join("; ")}.`
+        : "SSH не отвечает: данных о нагрузке нет." + (s.error ? " Ошибка: " + s.error : "")));
+    }
+    if (s && s.status === "up") {
+      const st = el("div", "stats");
+      st.append(stat("CPU", Math.round(s.cpu_percent || 0) + " %", {state: (s.cpu_percent || 0) >= 80 ? "warn" : "ok"}),
+        stat("RAM", s.ram_total_gb ? Math.round(100 * s.ram_used_gb / s.ram_total_gb) + " %" : "—"),
+        stat("Диск", diskPct(s) + " %", {state: diskPct(s) >= 85 ? "warn" : "ok", note: "свободно " + nf(s.disk_free_gb, 1) + " ГБ"}),
+        stat("Трафик за сутки", s.traffic_1d_gb != null ? (s.traffic_1d_gb >= 1000 ? nf(s.traffic_1d_gb / 1000, 2) + " ТБ" : Math.round(s.traffic_1d_gb) + " ГБ") : "—",
+          {note: s.traffic_30d_gb != null ? "30 дней: " + (s.traffic_30d_gb >= 1000 ? nf(s.traffic_30d_gb / 1000, 2) + " ТБ" : Math.round(s.traffic_30d_gb) + " ГБ") : ""}));
+      d.append(st);
+    }
+    const cpuBox = el("div", "pj-chart"), rxBox = el("div", "pj-chart");
+    const sec = (title, box) => { const c = el("section", "drawer-sec"); const h = el("div", "card-head"); h.append(el("h3", null, title)); c.append(h, box); return c; };
+    d.append(sec("CPU за сутки, %", cpuBox), sec("Входящий трафик за сутки, Мбит/с", rxBox));
+    const acts = el("div", "drawer-acts");
+    const dl = el("a", "btn", "Скачать журнал CSV"); dl.href = "/api/logs/" + encodeURIComponent(name);
+    acts.append(dl);
+    d.append(acts);
+    close.focus();
+    try {
+      const r = await fetch("/api/history/" + encodeURIComponent(name) + "?hours=24", {cache: "no-store"});
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const h = await r.json();
+      if (drawerFor !== name) return;
+      drawChart(cpuBox, {title: "CPU", kind: "line", unit: "%", series: [{name: "CPU", points: h.series.cpu}]});
+      drawChart(rxBox, {title: "RX", kind: "line", unit: "Мбит/с", series: [{name: "RX", points: h.series.rx}]});
+    } catch (err) {
+      cpuBox.append(el("p", "muted", "История недоступна: " + err.message));
+    }
+  }
+  function closeDrawer() {
+    drawerFor = null;
+    const d = $("srvDrawer"); if (d) d.classList.add("hidden");
+    const sh = $("srvShade"); if (sh) sh.classList.add("hidden");
+    if (/^#servers\//.test(location.hash)) history.replaceState(null, "", "#servers");
+  }
+
+  /* ---------- поиск Ctrl+K ---------- */
+  let palIdx = 0;
+  function paletteItems(q) {
+    q = q.trim().toLowerCase();
+    const all = [];
+    ((metrics && metrics.servers) || []).forEach((s) => {
+      const exits = s.status !== "up" ? liveExitsVia(s.name) : [];
+      all.push({group: "Серверы", title: s.name, sub: s.status === "up" ? `CPU ${Math.round(s.cpu_percent || 0)} % · диск ${diskPct(s)} %` : "SSH не отвечает" + (exits.length ? ", VPN-выход жив" : ""),
+        st: s.status !== "up" ? "bad" : diskPct(s) >= 85 ? "warn" : "ok", href: "#servers/" + encodeURIComponent(s.name), hay: (s.name + " " + (s.host || "")).toLowerCase()});
+    });
+    ((overview && overview.projects) || []).forEach((p) => all.push({group: "Проекты", title: p.name, sub: p.stage || "", st: p.state, href: "#projects/" + p.id, hay: (p.name + " " + p.id + " " + (p.link || "")).toLowerCase()}));
+    allCerts().forEach((c) => all.push({group: "Сертификаты", title: c.host, sub: c.error ? "ошибка проверки" : `истекает через ${c.days_left} дн`, st: certState(c), href: "#tls", hay: c.host.toLowerCase()}));
+    [["Обзор", "#overview"], ["Все проекты", "#projects"], ["Таблица серверов", "#servers"], ["Сертификаты", "#tls"]].forEach(([t, h]) => all.push({group: "Разделы", title: t, sub: "", st: null, href: h, hay: t.toLowerCase()}));
+    return (q ? all.filter((x) => x.hay.includes(q)) : all.filter((x) => x.group !== "Сертификаты")).slice(0, 12);
+  }
+  function renderPalette() {
+    const list = $("palList"), q = $("palInput").value;
+    const items = paletteItems(q);
+    palIdx = Math.min(palIdx, Math.max(0, items.length - 1));
+    list.textContent = "";
+    let g = null;
+    items.forEach((it, i) => {
+      if (it.group !== g) { g = it.group; list.append(el("div", "pal-group", g)); }
+      const a = el("a", "pal-item" + (i === palIdx ? " active" : "")); a.href = it.href;
+      if (it.st) a.append(el("span", "sdot " + it.st));
+      const t = el("span", "pal-title"); t.append(document.createTextNode(it.title)); if (it.sub) t.append(el("span", "pl", " · " + it.sub));
+      a.append(t);
+      a.addEventListener("click", closePalette);
+      list.append(a);
+    });
+    if (!items.length) list.append(el("div", "pal-empty", "Ничего не найдено"));
+  }
+  function openPalette() {
+    let p = $("palette");
+    if (!p) {
+      p = el("div", "palette hidden"); p.id = "palette";
+      const box = el("div", "pal-box"); box.setAttribute("role", "dialog"); box.setAttribute("aria-label", "Поиск");
+      const row = el("div", "pal-input");
+      const inp = el("input"); inp.id = "palInput"; inp.setAttribute("placeholder", "Сервер, проект, домен…"); inp.setAttribute("aria-label", "Поиск"); inp.autocomplete = "off";
+      row.append(inp, el("span", "kbd", "Esc"));
+      const list = el("div", "pal-list"); list.id = "palList";
+      box.append(row, list, el("div", "pal-foot", "↑↓ выбрать · Enter открыть · ищет по серверам, проектам и доменам"));
+      p.append(box);
+      p.addEventListener("click", (e) => { if (e.target === p) closePalette(); });
+      inp.addEventListener("input", () => { palIdx = 0; renderPalette(); });
+      inp.addEventListener("keydown", (e) => {
+        const n = $("palList").querySelectorAll(".pal-item").length;
+        if (e.key === "ArrowDown") { palIdx = Math.min(n - 1, palIdx + 1); renderPalette(); e.preventDefault(); }
+        else if (e.key === "ArrowUp") { palIdx = Math.max(0, palIdx - 1); renderPalette(); e.preventDefault(); }
+        else if (e.key === "Enter") { const a = $("palList").querySelectorAll(".pal-item")[palIdx]; if (a) { location.hash = a.getAttribute("href"); closePalette(); } e.preventDefault(); }
+      });
+      document.body.append(p);
+    }
+    p.classList.remove("hidden");
+    $("palInput").value = ""; palIdx = 0; renderPalette();
+    $("palInput").focus();
+  }
+  function closePalette() { const p = $("palette"); if (p) p.classList.add("hidden"); }
+  document.addEventListener("keydown", (e) => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || "");
+    if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "л")) { e.preventDefault(); openPalette(); }
+    else if (e.key === "/" && !typing) { e.preventDefault(); openPalette(); }
+    else if (e.key === "Escape") { closePalette(); if (drawerFor) closeDrawer(); }
+  });
 
   /* ---------- Проекты ---------- */
   function renderProjects() {
@@ -416,30 +769,6 @@
     table.append(thead, body); wrap.append(table); card.append(wrap);
     return card;
   }
-  function matrixCard(mx) {
-    const card = el("section", "card");
-    const head = el("div", "card-head"); head.append(el("h2", null, mx.title)); if (mx.note) head.append(el("span", "muted", mx.note));
-    card.append(head);
-    const cols = mx.columns || [];
-    const grid = el("div", "matrix");
-    grid.style.gridTemplateColumns = `56px repeat(${cols.length}, minmax(22px, 1fr)) auto`;
-    grid.append(el("span"));
-    cols.forEach((c) => grid.append(el("span", "mh", c)));
-    grid.append(el("span", "mh", ""));
-    (mx.rows || []).forEach((r) => {
-      grid.append(el("span", "mr", r.label));
-      (r.cells || []).forEach((c) => { const cell = el("span", "mc " + (c.state === "ok" ? "" : c.state)); cell.title = c.title || ""; grid.append(cell); });
-      grid.append(el("span", "mv", r.value || ""));
-    });
-    card.append(grid);
-    const lg = el("div", "legend");
-    [["выход жив", "color-mix(in srgb,var(--ok) 50%,transparent)"], ["не отвечает", "color-mix(in srgb,var(--bad) 60%,transparent)"], ["выключен или нет на копии", "transparent"]].forEach(([t, c], i) => {
-      const s = el("span"), sw = el("i"); sw.style.background = c; if (i === 2) sw.style.border = "1px dashed var(--muted)"; s.append(sw, document.createTextNode(t)); lg.append(s);
-    });
-    card.append(lg);
-    return card;
-  }
-
   async function renderProject(id) {
     const v = $("projectsView");
     let p;
@@ -465,7 +794,7 @@
     if (!an || an.error) { v.append(el("p", "muted", an && an.error ? an.error : "Подробная аналитика не подключена: видны сайт и сертификат.")); return; }
     if ((an.kpis || []).length) { const s = el("section", "stats"); s.setAttribute("aria-label", "Ключевые цифры"); an.kpis.forEach((k) => s.append(kpiStat(k))); v.append(s); }
     const blocks = [];
-    (an.matrices || []).forEach((mx) => blocks.push(matrixCard(mx)));
+    (an.matrices || []).forEach((mx) => blocks.push(matrixCard(mx, (serversTableOf(an) || {}).rows)));
     (an.charts || []).forEach((c) => {
       const card = el("section", "card"), head = el("div", "card-head");
       head.append(el("h2", null, c.title)); if (c.note) head.append(el("span", "muted", c.note));
@@ -537,6 +866,12 @@
       const [pr, mr] = await Promise.all([fetch("/api/projects", {cache: "no-store"}), fetch("/api/metrics", {cache: "no-store"})]);
       if (pr.ok) overview = await pr.json();
       if (mr.ok) metrics = await mr.json();
+      /* обзору нужны подробные документы проектов с доходом по месяцам (там же матрица связности) */
+      const want = ((overview && overview.projects) || []).filter((p) => p.analytics && (p.analytics.kpis || []).some((k) => k.id === "revenue_month"));
+      const got = await Promise.all(want.map((p) => fetch("/api/projects/" + p.id, {cache: "no-store"}).then((r) => r.ok ? r.json() : null).catch(() => null)));
+      const next = {};
+      want.forEach((p, i) => { if (got[i]) next[p.id] = got[i]; });
+      details = next;
       if (overview && overview.server_groups && JSON.stringify(window.infoServerGroups) !== JSON.stringify(overview.server_groups)) {
         window.infoServerGroups = overview.server_groups;
         if (typeof renderTable === "function") renderTable();
@@ -549,15 +884,17 @@
     }
   }
   function parseHash() {
-    const m = location.hash.match(/^#(overview|projects|servers|tls)(?:\/([a-z0-9_-]+))?$/);
-    return m ? {view: m[1], id: m[1] === "projects" ? m[2] || null : null} : {view: "overview", id: null};
+    const m = location.hash.match(/^#(overview|projects|servers|tls)(?:\/(.+))?$/);
+    if (!m) return {view: "overview", id: null, server: null};
+    const tail = m[2] ? decodeURIComponent(m[2]) : null;
+    return {view: m[1], id: m[1] === "projects" && /^[a-z0-9_-]+$/.test(tail || "") ? tail : null, server: m[1] === "servers" ? tail : null};
   }
   function paint() {
     VIEWS.forEach((v) => $(v + "View").classList.toggle("hidden", v !== current.view));
     renderRail();
     if (current.view === "overview") renderOverview();
     else if (current.view === "projects") { if (current.id) renderProject(current.id); else renderProjects(); }
-    else if (current.view === "servers") renderServersSummary();
+    else if (current.view === "servers") { renderServersSummary(); if (current.server && (drawerFor !== current.server || !drawerHasData)) openDrawer(current.server); }
     else if (current.view === "tls") renderTls();
   }
   async function route(scroll) {
@@ -570,7 +907,21 @@
     if (document.hidden) return;
     paint();
   }
-  window.addEventListener("hashchange", () => route(true));
+  window.addEventListener("hashchange", () => {
+    const was = current.view;
+    route(!/^#servers\//.test(location.hash) || was !== "servers");
+    if (!/^#servers\//.test(location.hash) && drawerFor) closeDrawer();
+  });
+  /* клик по имени сервера в таблице — карточка; двойной клик app.js оставляет для переименования */
+  let clickT = null;
+  $("rows").addEventListener("click", (e) => {
+    const span = e.target.closest(".editable-name");
+    if (!span) return;
+    clearTimeout(clickT);
+    clickT = setTimeout(() => { location.hash = "#servers/" + encodeURIComponent(span.dataset.server); }, 260);
+  });
+  $("rows").addEventListener("dblclick", () => clearTimeout(clickT));
+  $("railSearch").addEventListener("click", openPalette);
   let resizeT = null;
   window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(paint, 250); });
   (async () => {

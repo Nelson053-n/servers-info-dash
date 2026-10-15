@@ -91,3 +91,25 @@ def test_server_groups_are_passed_to_the_overview(tmp_path):
     cfg = projects.load_projects_config(path)
     result = asyncio.run(projects.collect(cfg))
     assert result["server_groups"] == [{"title": "РФ-входы", "servers": ["Россия вход 2"]}]
+
+
+def test_server_history_averages_by_hour_and_skips_old_rows(main_module, tmp_path, monkeypatch):
+    import datetime as dt
+    monkeypatch.setattr(main_module, "_LOGS_DIR", tmp_path)
+    now = dt.datetime.now(dt.timezone.utc)
+    hour = now.replace(minute=0, second=0, microsecond=0)
+    rows = [
+        (hour, 10, 1.0), (hour + dt.timedelta(minutes=min(30, now.minute)), 30, 3.0),
+        (hour - dt.timedelta(hours=30), 99, 9.0),  # за пределами окна
+    ]
+    by_day = {}
+    for ts, cpu, rx in rows:
+        by_day.setdefault(ts.date().isoformat(), []).append(
+            f"{ts.strftime('%Y-%m-%d %H:%M')},Сервер,h,up,1,1,{cpu},1,2,1,2,{rx},0,eth0,")
+    header = "timestamp,name,host,status,uptime_days,ping_ms,cpu_percent,ram_used_gb,ram_total_gb,disk_free_gb,disk_total_gb,rx_mbps,tx_mbps,interface,error"
+    for d, lines in by_day.items():
+        (tmp_path / f"{main_module._safe_filename('Сервер')}_{d}.csv").write_text(header + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    h = main_module._server_history("Сервер", 24)
+    assert h["series"]["cpu"] == [[hour.isoformat(), 20.0]]
+    assert h["series"]["rx"] == [[hour.isoformat(), 2.0]]
+    assert h["series"]["ram"] == [[hour.isoformat(), 50.0]]
