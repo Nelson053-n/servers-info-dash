@@ -53,9 +53,16 @@ class ProjectConfig(BaseModel):
     analytics: SummarySource | None = None
 
 
+class ServerGroup(BaseModel):
+    title: str
+    # Имена серверов ровно как в servers.yaml; не попавшие ни в одну группу идут в «Прочие»
+    servers: list[str] = []
+
+
 class ProjectsConfig(BaseModel):
     refresh_sec: int = Field(default=300, ge=60, le=3600)
     projects: list[ProjectConfig] = []
+    server_groups: list[ServerGroup] = []
     # Домены, у которых важен только срок сертификата (общий сертификат на хосте и т.п.)
     tls_hosts: list[str] = []
 
@@ -190,6 +197,7 @@ async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
     return {
         "generated_at": _now().isoformat(timespec="seconds"),
         "refresh_sec": cfg.refresh_sec,
+        "server_groups": [g.model_dump() for g in cfg.server_groups],
         "projects": list(projects),
         "tls": sorted(certs, key=lambda c: (c["days_left"] is not None, c["days_left"] or 0)),
     }
@@ -213,6 +221,9 @@ def _card(doc: dict[str, Any] | None) -> dict[str, Any] | None:
         "age_min": doc.get("age_min"),
         "kpis": (doc.get("kpis") or [])[:4],
         "spark": charts[0] if charts else None,
+        # для сводки «выручка всех проектов» на обзоре — по договорённому id
+        "revenue_30d": next((k.get("value") for k in doc.get("kpis") or []
+                             if k.get("id") == "revenue_30d" and isinstance(k.get("value"), (int, float))), None),
     }
 
 

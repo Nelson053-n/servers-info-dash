@@ -82,3 +82,12 @@ def test_projects_endpoint_requires_login(main_module):
     finally:
         main_module._auth.password_hash = ""
     assert r.status_code == 401
+
+
+def test_server_groups_are_passed_to_the_overview(tmp_path):
+    import asyncio
+    path = tmp_path / "projects.yaml"
+    path.write_text("server_groups:\n  - title: РФ-входы\n    servers: [Россия вход 2]\n", encoding="utf-8")
+    cfg = projects.load_projects_config(path)
+    result = asyncio.run(projects.collect(cfg))
+    assert result["server_groups"] == [{"title": "РФ-входы", "servers": ["Россия вход 2"]}]

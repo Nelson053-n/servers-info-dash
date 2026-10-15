@@ -567,7 +567,19 @@ function renderTable() {
   if (cn && showLocal) {
     data = data.map(s => s.is_local ? {...s, _origName: s.name, name: cn} : s);
   }
-  rows.innerHTML = data.map(rowTemplate).join("");
+  /* группы по ролям (server_groups в config/projects.yaml, приходят через views.js);
+     внутри группы — текущая сортировка, сервер вне групп — в «Прочие» */
+  const groups = window.infoServerGroups || [];
+  if (!groups.length) { rows.innerHTML = data.map(rowTemplate).join(""); return; }
+  const idx = new Map();
+  groups.forEach((g, i) => (g.servers || []).forEach((n) => idx.set(n, i)));
+  const buckets = groups.map(() => []), rest = [];
+  data.forEach((s) => { const i = idx.get(s._origName || s.name); (i === undefined ? rest : buckets[i]).push(s); });
+  const head = (title, n) => '<tr class="grp"><td colspan="13">' + esc(title) + '<b>' + n + '</b></td></tr>';
+  let html = "";
+  groups.forEach((g, i) => { if (buckets[i].length) html += head(g.title, buckets[i].length) + buckets[i].map(rowTemplate).join(""); });
+  if (rest.length) html += head("Прочие", rest.length) + rest.map(rowTemplate).join("");
+  rows.innerHTML = html;
 }
 
 function showMeta(data) {
@@ -886,7 +898,7 @@ async function refresh() {
 
 /* Dim the table while the figures on it are known to be out of date. */
 function _markStale(stale) {
-  const box = document.querySelector("table");
+  const box = document.getElementById("srvTable");
   if (box) box.classList.toggle("stale", stale);
 }
 
