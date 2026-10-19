@@ -41,7 +41,14 @@
   const MON = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
   const MONTH = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
   const dm = (x) => { const d = parseX(x); return isNaN(d) ? String(x) : String(d.getDate()).padStart(2, "0") + "." + String(d.getMonth() + 1).padStart(2, "0"); };
-  const ago = (min) => min == null ? "" : min < 1 ? "только что" : min < 60 ? min + " мин назад" : Math.round(min / 60) + " ч назад";
+  const ago = (min) => {
+    if (min == null) return "";
+    if (min < 1) return "только что";
+    const d = Math.floor(min / 1440), h = Math.floor(min % 1440 / 60), m = Math.round(min % 60);
+    if (d) return d + " дн" + (h ? " " + h + " ч" : "") + " назад";
+    if (h) return h + " ч" + (m ? " " + m + " мин" : "") + " назад";
+    return m + " мин назад";
+  };
   const chip = (state, text) => el("span", "chip " + (state || "ok"), text || STATE[state] || state);
   const diskPct = (s) => s.disk_total_gb ? Math.round(100 * (1 - s.disk_free_gb / s.disk_total_gb)) : 0;
   const PALETTE = ["var(--accent)", "var(--warn)", "#14b8a6", "#a855f7", "var(--muted)"];

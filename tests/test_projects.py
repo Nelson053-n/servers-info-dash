@@ -130,3 +130,12 @@ def test_month_traffic_counts_only_files_from_the_first_of_the_month(main_module
     write(before)  # прошлый месяц — не в счёт
     one_minute_gb = 80 * 60 / 8 / 1000  # 80 Мбит/с за 60 с
     assert main_module._get_traffic_month_gb_cached()["S"] == round(one_minute_gb, 3)
+
+
+def test_stale_warning_formats_age_in_days_and_hours():
+    doc = {"stale": True, "age_min": 4109}
+    _, issues = projects._state_of(_row(analytics=doc))
+    assert any(i["text"] == "аналитика не обновлялась 2 дн 20 ч" for i in issues)
+    assert projects._fmt_age(45) == "45 мин"
+    assert projects._fmt_age(310) == "5 ч 10 мин"
+    assert projects._fmt_age(1440) == "1 дн"

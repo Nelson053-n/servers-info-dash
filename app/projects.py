@@ -148,6 +148,17 @@ def fetch_analytics(src: SummarySource) -> dict[str, Any]:
     return data
 
 
+def _fmt_age(minutes: int) -> str:
+    """Минуты → «45 мин» / «5 ч 10 мин» / «2 дн 20 ч»."""
+    d, rem = divmod(int(minutes), 1440)
+    h, m = divmod(rem, 60)
+    if d:
+        return f"{d} дн {h} ч" if h else f"{d} дн"
+    if h:
+        return f"{h} ч {m} мин" if m else f"{h} ч"
+    return f"{m} мин"
+
+
 def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     """ok / warn / bad и замечания [{severity, text}]: сайт, сертификат и alerts самого проекта."""
     bad: list[str] = []
@@ -172,7 +183,7 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     if doc.get("error"):
         warn.append(doc["error"])
     if doc.get("stale"):
-        warn.append(f"аналитика не обновлялась {doc.get('age_min')} мин")
+        warn.append(f"аналитика не обновлялась {_fmt_age(doc.get('age_min') or 0)}")
     for a in doc.get("alerts") or []:
         text = str(a.get("text", ""))[:200]
         (bad if a.get("severity") == "bad" else warn).append(text)
