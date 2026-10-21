@@ -635,9 +635,9 @@
         const up = s.status === "up", cpu = Math.round(s.cpu_percent || 0), disk = diskPct(s);
         const t = el("a", "fc" + (!up ? " bad" : disk >= 85 ? " warn" : cpu >= 80 ? " hot" : ""));
         t.href = "#servers/" + encodeURIComponent(s.name);
-        const meter = el("span", "fc-meter"), fill = el("i");
-        fill.style.width = (up ? Math.max(cpu, 3) : 100) + "%";
-        meter.append(fill);
+        /* 20 сегментов по 5 %: число зажжённых сегментов однозначно читается как CPU */
+        const meter = el("span", "fc-meter"), lit = !up ? 20 : cpu > 0 ? Math.max(1, Math.round(cpu / 5)) : 0;
+        for (let k = 0; k < 20; k++) meter.append(el("i", k < lit ? "on" : ""));
         t.append(el("span", "fc-name", s.name), meter,
           up ? (() => { const v = el("span", "fc-val mono"); v.append(el("span", null, "CPU " + cpu), ...(disk >= 85 ? [el("b", null, "диск " + disk)] : [])); return v; })()
              : el("span", "fc-val mono", "нет связи"));
@@ -1004,6 +1004,20 @@
     paint();
     if (scroll) window.scrollTo(0, 0);
   }
+  let fleetBusy = false;
+  async function refreshFleet() {
+    if (document.hidden || current.view !== "overview" || fleetBusy) return;
+    const old = document.querySelector("#overviewView .fleet-card");
+    if (!old) return;
+    fleetBusy = true;
+    try {
+      const r = await fetch("/api/metrics", {cache: "no-store"});
+      if (!r.ok) return;
+      metrics = await r.json();
+      const cur = document.querySelector("#overviewView .fleet-card");
+      if (cur && current.view === "overview") cur.replaceWith(rolesCard());
+    } catch (err) { /* следующий тик попробует снова */ } finally { fleetBusy = false; }
+  }
   async function tick() {
     await load();
     if (document.hidden) return;
@@ -1033,5 +1047,8 @@
     await load();
     paint();
     timer = setInterval(tick, 60000);
+    /* CPU скачет от замера к замеру, а таблица серверов обновляется каждые 2 с — ленту на обзоре обновляем в том же ритме,
+       но только её саму: перерисовка всего обзора каждые несколько секунд сбивала бы прокрутку */
+    setInterval(refreshFleet, Math.max(3, (metrics && metrics.refresh_interval_sec) || 5) * 1000);
   })();
 })();

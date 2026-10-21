@@ -56,15 +56,15 @@ body{font-stretch:88%}                       /* Martian Mono широкий — 
 .fleet{background:none}
 .fc:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .fc-name{font-size:12px;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
-.fc-meter{display:block;height:8px;background:color-mix(in srgb,var(--text) 9%,transparent);
-  -webkit-mask:repeating-linear-gradient(90deg,#000 0 5px,transparent 5px 7px);mask:repeating-linear-gradient(90deg,#000 0 5px,transparent 5px 7px)}
-.fc-meter i{display:block;height:100%;background:var(--accent)}
+.fc-meter{display:grid;grid-template-columns:repeat(20,1fr);gap:2px;height:8px}
+.fc-meter i{background:color-mix(in srgb,var(--text) 9%,transparent)}
+.fc-meter i.on{background:var(--accent)}
 .fc-val{display:flex;justify-content:space-between;gap:6px;font-size:10.5px;color:var(--muted);white-space:nowrap}
 .fc-val b{font-weight:500;color:var(--warn-fg)}
-.fc.hot .fc-meter i{background:var(--warn)}
+.fc.hot .fc-meter i.on{background:var(--warn)}
 .fc.warn{box-shadow:inset 2px 0 0 var(--warn)}.fc.warn .fc-val{color:var(--warn-fg)}
 .fc.bad{box-shadow:inset 2px 0 0 var(--bad);background:color-mix(in srgb,var(--bad) 9%,transparent)}
-.fc.bad .fc-meter i{background:var(--bad)}.fc.bad .fc-val{color:var(--bad-fg)}.fc.bad .fc-name{color:var(--bad-fg)}
+.fc.bad .fc-meter i.on{background:var(--bad)}.fc.bad .fc-val{color:var(--bad-fg)}.fc.bad .fc-name{color:var(--bad-fg)}
 
 /* замечания и задачи: квадратные маркеры, ряды на линиях */
 .ins-dot{width:8px;height:8px;border-radius:1px;margin-top:6px}
