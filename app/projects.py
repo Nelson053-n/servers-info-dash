@@ -51,6 +51,9 @@ class ProjectConfig(BaseModel):
     tls_host: str | None = None
     note: str = ""
     analytics: SummarySource | None = None
+    # Алерты из документа аналитики, содержащие любую из подстрок (без учёта регистра), не показываются:
+    # то, на что мы не влияем (например, блокировки провайдером у vpn).
+    mute_alerts: list[str] = []
 
 
 class ServerGroup(BaseModel):
@@ -159,6 +162,13 @@ def _fmt_age(minutes: int) -> str:
     return f"{m} мин"
 
 
+def _drop_muted(doc: dict[str, Any] | None, patterns: list[str]) -> None:
+    if not isinstance(doc, dict) or not patterns or not doc.get("alerts"):
+        return
+    low = [x.lower() for x in patterns]
+    doc["alerts"] = [a for a in doc["alerts"] if not any(x in str(a.get("text", "")).lower() for x in low)]
+
+
 def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     """ok / warn / bad и замечания [{severity, text}]: сайт, сертификат и alerts самого проекта."""
     bad: list[str] = []
@@ -198,6 +208,7 @@ async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
             asyncio.to_thread(tls_expiry, p.tls_host) if p.tls_host else _none(),
             asyncio.to_thread(fetch_analytics, p.analytics) if p.analytics else _none(),
         )
+        _drop_muted(doc, p.mute_alerts)
         row = {"id": p.id, "name": p.name, "stage": p.stage, "link": p.link, "note": p.note,
                "check": check, "tls": tls, "analytics": doc}
         row["state"], row["issues"] = _state_of(row)

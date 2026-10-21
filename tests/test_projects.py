@@ -139,3 +139,17 @@ def test_stale_warning_formats_age_in_days_and_hours():
     assert projects._fmt_age(45) == "45 мин"
     assert projects._fmt_age(310) == "5 ч 10 мин"
     assert projects._fmt_age(1440) == "1 дн"
+
+
+def test_muted_alerts_are_dropped_and_do_not_color_the_project():
+    doc = {"alerts": [{"severity": "warn", "text": "ТСПУ блокирует (cheburcheck): Германия"},
+                      {"severity": "warn", "text": "Просрочено задач: 3"}]}
+    projects._drop_muted(doc, ["тспу"])
+    assert [a["text"] for a in doc["alerts"]] == ["Просрочено задач: 3"]
+    only = {"alerts": [{"severity": "warn", "text": "ТСПУ блокирует"}]}
+    projects._drop_muted(only, ["ТСПУ"])
+    state, issues = projects._state_of(_row(analytics=only))
+    assert state == "ok" and issues == []
+    keep = {"alerts": [{"severity": "warn", "text": "ТСПУ блокирует"}]}
+    projects._drop_muted(keep, [])
+    assert len(keep["alerts"]) == 1
