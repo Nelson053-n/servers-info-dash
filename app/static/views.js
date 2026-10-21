@@ -3,7 +3,7 @@
    Данные: /api/projects, /api/projects/<id> (формат docs/analytics-schema.md), /api/metrics. */
 (function () {
   "use strict";
-  const VIEWS = ["overview", "projects", "servers", "tls"];
+  const VIEWS = ["overview", "tasks", "projects", "servers", "tls"];
   const SVG = "http://www.w3.org/2000/svg";
   const STATE = {ok: "норма", warn: "замечания", bad: "проблема"};
   const SEV = {bad: "Срочно", warn: "Проверить"};
@@ -397,24 +397,61 @@
     if (nHidden) head.append(showAll);
     card.append(head);
     const grid = el("div", "ins-grid");
-    shown.forEach((it) => {
-      const row = el("div", "ins");
-      row.append(el("span", "ins-dot " + it.sev));
-      const body = el("div", "ins-body"), top = el("div", "ins-top");
-      top.append(el("b", null, it.title), el("span", "ins-src", it.src));
-      body.append(top);
-      if (it.text) body.append(el("div", "ins-text", it.text));
-      const acts = el("div", "ins-acts");
-      const open = el("a", "btn small", it.kind === "server" ? "Открыть сервер" : "Открыть"); open.href = it.href;
-      const later = el("button", "btn small ghost", "Отложить на сутки"); later.type = "button";
-      later.addEventListener("click", () => { snooze(it.key); renderOverview(); renderRail(); });
-      acts.append(open, later);
-      body.append(acts);
-      row.append(body);
-      grid.append(row);
-    });
+    shown.forEach((it) => grid.append(insRow(it, renderOverview)));
     card.append(grid);
     return card;
+  }
+  function insRow(it, rerender) {
+    const row = el("div", "ins");
+    row.append(el("span", "ins-dot " + it.sev));
+    const body = el("div", "ins-body"), top = el("div", "ins-top");
+    top.append(el("b", null, it.title), el("span", "ins-src", it.src));
+    body.append(top);
+    if (it.text) body.append(el("div", "ins-text", it.text));
+    const acts = el("div", "ins-acts");
+    const open = el("a", "btn small", it.kind === "server" ? "Открыть сервер" : "Открыть"); open.href = it.href;
+    const later = el("button", "btn small ghost", "Отложить на сутки"); later.type = "button";
+    later.addEventListener("click", () => { snooze(it.key); rerender(); renderRail(); });
+    acts.append(open, later);
+    body.append(acts);
+    row.append(body);
+    return row;
+  }
+  function renderTasks() {
+    const v = $("tasksView");
+    v.textContent = "";
+    if (!overview || !overview.ready) { v.append(el("p", "muted", "Сбор данных…")); return; }
+    const items = insights(), hidden = snoozed();
+    const open = items.filter((i) => !hidden[i.key]);
+    const later = items.filter((i) => hidden[i.key]);
+    v.append(viewHead("собирается из серверов, проектов и сертификатов · обновляется сама", "Текущие задачи"));
+    if (!items.length) { const bar = el("section", "attn-bar"); bar.append(el("span", "ins-dot ok"), el("span", null, "Задач нет — всё в норме")); v.append(bar); return; }
+    const group = (title, list, hint) => {
+      if (!list.length) return;
+      const card = el("section", "card attn2");
+      const head = el("div", "card-head");
+      head.append(el("h2", null, title), el("span", "muted", list.length + (hint ? " · " + hint : "")));
+      card.append(head);
+      const grid = el("div", "ins-grid");
+      list.forEach((it) => grid.append(insRow(it, renderTasks)));
+      card.append(grid);
+      v.append(card);
+    };
+    group("Срочно", open.filter((i) => i.sev === "bad"));
+    group("Проверить", open.filter((i) => i.sev !== "bad"));
+    if (!open.length) { const bar = el("section", "attn-bar"); bar.append(el("span", "ins-dot ok"), el("span", null, "Срочного нет — отложенное вернётся через сутки")); v.append(bar); }
+    if (later.length) {
+      const back = el("button", "btn small ghost", "Вернуть все отложенные"); back.type = "button";
+      back.addEventListener("click", () => { try { localStorage.removeItem(SNOOZE_KEY); } catch (e) { /* ничего */ } renderTasks(); renderRail(); });
+      const card = el("section", "card attn2");
+      const head = el("div", "card-head");
+      head.append(el("h2", null, "Отложено"), el("span", "muted", later.length + " · вернутся через сутки"), back);
+      card.append(head);
+      const list = el("div", "ins-list");
+      later.forEach((it) => { const r = el("div", "ins"), b = el("div", "ins-body"), t = el("div", "ins-top"); t.append(el("b", null, it.title), el("span", "ins-src", it.src)); b.append(t); r.append(el("span", "ins-dot " + it.sev), b); list.append(r); });
+      card.append(list);
+      v.append(card);
+    }
   }
 
   /* ---------- доход по месяцам ---------- */
@@ -907,6 +944,9 @@
       });
       const issues = overview.projects.filter((p) => p.state !== "ok").length;
       const cp = $("cntProjects"); cp.textContent = issues ? String(issues) : String(overview.projects.length); cp.className = "cnt" + (issues ? " warn" : "");
+      const hid = snoozed(), todo = insights().filter((i) => !hid[i.key]);
+      const nb = todo.filter((i) => i.sev === "bad").length;
+      const ctk = $("cntTasks"); ctk.textContent = todo.length ? String(todo.length) : ""; ctk.className = "cnt" + (nb ? " bad" : todo.length ? " warn" : "");
       const soon = allCerts().filter((c) => certState(c) !== "ok").length;
       const ct = $("cntTls"); ct.textContent = soon ? String(soon) : ""; ct.className = "cnt" + (soon ? " warn" : "");
     }
@@ -943,7 +983,7 @@
     }
   }
   function parseHash() {
-    const m = location.hash.match(/^#(overview|projects|servers|tls)(?:\/(.+))?$/);
+    const m = location.hash.match(/^#(overview|tasks|projects|servers|tls)(?:\/(.+))?$/);
     if (!m) return {view: "overview", id: null, server: null};
     const tail = m[2] ? decodeURIComponent(m[2]) : null;
     return {view: m[1], id: m[1] === "projects" && /^[a-z0-9_-]+$/.test(tail || "") ? tail : null, server: m[1] === "servers" ? tail : null};
@@ -952,6 +992,7 @@
     VIEWS.forEach((v) => $(v + "View").classList.toggle("hidden", v !== current.view));
     renderRail();
     if (current.view === "overview") renderOverview();
+    else if (current.view === "tasks") renderTasks();
     else if (current.view === "projects") { if (current.id) renderProject(current.id); else renderProjects(); }
     else if (current.view === "servers") { renderServersSummary(); if (current.server && (drawerFor !== current.server || !drawerHasData)) openDrawer(current.server); }
     else if (current.view === "tls") renderTls();

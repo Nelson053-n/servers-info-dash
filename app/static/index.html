@@ -183,6 +183,7 @@ tr:last-child td{border-bottom:none}
     <button class="rail-search" id="railSearch" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>Поиск</span><kbd>Ctrl K</kbd></button>
     <nav class="rail-nav" aria-label="Разделы">
       <a href="#overview" data-view="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Обзор</span></a>
+      <a href="#tasks" data-view="tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 7 2 2 3-4M4 17l2 2 3-4M13 7h7M13 17h7"/></svg><span>Задачи</span><i class="cnt" id="cntTasks"></i></a>
       <a href="#projects" data-view="projects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18M3 12h18M3 17h12"/></svg><span>Проекты</span><i class="cnt" id="cntProjects"></i></a>
       <div class="rail-sub" id="railProjects"></div>
       <a href="#servers" data-view="servers"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span>Серверы</span><i class="cnt" id="cntServers"></i></a>
@@ -212,6 +213,7 @@ tr:last-child td{border-bottom:none}
 
   <main class="content">
   <section id="overviewView" class="view hidden" aria-live="polite"></section>
+  <section id="tasksView" class="view hidden" aria-live="polite"></section>
   <section id="projectsView" class="view hidden" aria-live="polite"></section>
   <section id="tlsView" class="view hidden" aria-live="polite"></section>
   <section id="serversView" class="view hidden">
@@ -364,6 +366,6 @@ tr:last-child td{border-bottom:none}
 </div>
 
 <script src="/static/app.js?v=20261015b"></script>
-<script src="/static/views.js?v=20261019a"></script>
+<script src="/static/views.js?v=20261021a"></script>
 </body>
 </html>
