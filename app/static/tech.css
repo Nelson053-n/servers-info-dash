@@ -3,7 +3,7 @@
    Формы прямые, радиусы 2–4 px, блоки разделены линиями, а не тенями. */
 
 body{font-stretch:88%}                       /* Martian Mono широкий — сужаем по оси ширины; Plex Sans ось не имеет */
-.content{padding:24px 28px 56px}
+@media (min-width:761px){.content{padding:24px 28px 56px}}
 .view{gap:16px}
 
 /* карточки: тонкая рамка, почти прямые углы */
