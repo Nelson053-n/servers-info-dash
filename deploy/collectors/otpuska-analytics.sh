@@ -70,9 +70,8 @@ if current:
 tasks = {s: num(n) for s, n in pick("task")}
 overdue = num((pick("overdue") or [["0"]])[0][0])
 kpis.append({"id": "tasks_pending", "label": "Задач на согласовании", "value": tasks.get("pending", 0)})
-kpis.append({"id": "overdue", "label": "Просрочено задач", "value": overdue, "state": "warn" if overdue else "ok"})
-if overdue:
-    alerts.append({"severity": "warn", "text": f"Просрочено задач согласования: {overdue}"})
+# Просроченные согласования — рабочий процесс стенда, а не сбой: плитка без предупреждения и без алерта.
+kpis.append({"id": "overdue", "label": "Просрочено задач", "value": overdue})
 actors = num((pick("actors7") or [["0"]])[0][0])
 kpis.append({"id": "actors7", "label": "Работников с действиями за 7 дней", "value": actors})
 kpis.append({"id": "employees", "label": "Работников в базе", "value": num((pick("employees") or [["0"]])[0][0])})
