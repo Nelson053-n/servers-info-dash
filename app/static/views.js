@@ -674,11 +674,12 @@
     v.append(rolesCard(), attentionV2(items));
     const money = moneyCards();
     if (money.length) { const g = el("div", "grid2"); money.forEach((c) => g.append(c)); v.append(g); }
-    const mid = el("div", "grid2");
-    Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => mid.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
-    mid.append(trafficCard());
+    /* слева матрицы связности и под ними сертификаты — иначе под короткой матрицей пусто, пока справа длинный список трафика */
+    const mid = el("div", "grid2"), col = el("div", "stack");
+    Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => col.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
+    col.append(certCard(false));
+    mid.append(col, trafficCard());
     v.append(projectList(), mid);
-    v.append(certCard(false));
   }
 
   /* ---------- карточка сервера ---------- */

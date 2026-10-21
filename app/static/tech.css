@@ -98,3 +98,17 @@ body{font-stretch:88%}                       /* Martian Mono широкий — 
 .disk-track{height:4px}
 table{border-radius:4px}
 .edit-input,.iface-tip:hover::after{border-radius:3px}
+
+/* список проектов: ячейки тянутся на всю высоту ряда, иначе их линии не сходятся с линиями соседей
+   (пустая ячейка заголовка была ниже остальных, у графика была фиксированная высота) */
+.plist .ph{align-self:stretch}
+.plist .pspark{height:auto;min-height:44px}
+
+/* ссылки в шапках карточек: без стандартного фиолетового подчёркивания */
+.card-head>a,.card-head>a:visited{font-family:var(--mono);font-size:11px;color:var(--text2);text-decoration:none;
+  border-bottom:1px solid var(--line);padding-bottom:1px}
+.card-head>a:hover{color:var(--text);border-bottom-color:var(--accent)}
+.card-head>a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+/* столбец из нескольких карточек в сетке обзора */
+.stack{display:flex;flex-direction:column;gap:16px;min-width:0}
