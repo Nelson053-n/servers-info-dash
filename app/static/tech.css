@@ -112,3 +112,4 @@ table{border-radius:4px}
 
 /* столбец из нескольких карточек в сетке обзора */
 .stack{display:flex;flex-direction:column;gap:16px;min-width:0}
+.stack>:last-child{flex:1 1 auto}   /* последняя карточка столбца тянется до низа соседней — нижние края ровные */
