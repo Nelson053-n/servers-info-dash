@@ -615,9 +615,9 @@
 
   /* ---------- серверы по ролям ---------- */
   function rolesCard() {
-    const card = el("section", "card");
+    const card = el("section", "card fleet-card");
     const head = el("div", "card-head"); const a = el("a", null, "Таблица"); a.href = "#servers";
-    head.append(el("h2", null, "Серверы по ролям"), a);
+    head.append(el("h2", null, "Парк серверов"), a);
     card.append(head);
     const servers = (metrics && metrics.servers) || [];
     const groups = (overview && overview.server_groups && overview.server_groups.length) ? overview.server_groups : [{title: "Все", servers: servers.map((s) => s.name)}];
@@ -630,14 +630,18 @@
       if (!r.list.length) return;
       const line = el("div", "role-row");
       line.append(el("span", "muted", r.title));
-      const tiles = el("div", "heat");
+      const tiles = el("div", "fleet");
       r.list.forEach((s) => {
-        const t = el("a"); t.href = "#servers/" + encodeURIComponent(s.name);
-        let cls = "";
-        if (s.status !== "up") cls = "bad"; else if (diskPct(s) >= 85) cls = "warn"; else if ((s.cpu_percent || 0) >= 60) cls = "l3"; else if ((s.cpu_percent || 0) >= 20) cls = "l2";
-        t.className = cls;
-        t.textContent = s.name + (s.status === "up" ? " · " + Math.round(s.cpu_percent || 0) + " %" : "");
-        t.title = s.name + (s.status === "up" ? ` · CPU ${Math.round(s.cpu_percent || 0)} % · диск ${diskPct(s)} %` : " · нет связи");
+        const up = s.status === "up", cpu = Math.round(s.cpu_percent || 0), disk = diskPct(s);
+        const t = el("a", "fc" + (!up ? " bad" : disk >= 85 ? " warn" : cpu >= 80 ? " hot" : ""));
+        t.href = "#servers/" + encodeURIComponent(s.name);
+        const meter = el("span", "fc-meter"), fill = el("i");
+        fill.style.width = (up ? Math.max(cpu, 3) : 100) + "%";
+        meter.append(fill);
+        t.append(el("span", "fc-name", s.name), meter,
+          up ? (() => { const v = el("span", "fc-val mono"); v.append(el("span", null, "CPU " + cpu), ...(disk >= 85 ? [el("b", null, "диск " + disk)] : [])); return v; })()
+             : el("span", "fc-val mono", "нет связи"));
+        t.title = s.name + (up ? ` · CPU ${cpu} % · диск ${disk} %` : " · нет связи");
         tiles.append(t);
       });
       line.append(tiles);
@@ -667,16 +671,14 @@
     top.append(left, pills);
     v.append(top);
 
-    v.append(attentionV2(items));
+    v.append(rolesCard(), attentionV2(items));
     const money = moneyCards();
     if (money.length) { const g = el("div", "grid2"); money.forEach((c) => g.append(c)); v.append(g); }
     const mid = el("div", "grid2");
     Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => mid.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
     mid.append(trafficCard());
-    v.append(mid, projectList());
-    const bottom = el("div", "grid2");
-    bottom.append(rolesCard(), certCard(false));
-    v.append(bottom);
+    v.append(projectList(), mid);
+    v.append(certCard(false));
   }
 
   /* ---------- карточка сервера ---------- */
