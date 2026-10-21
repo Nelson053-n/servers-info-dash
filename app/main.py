@@ -2893,7 +2893,9 @@ async def _telegram_callback_poller() -> None:
     loop = asyncio.get_running_loop()
     offset: int | None = None
     while True:
-        if not _bot_ready():
+        # Два экземпляра с одним токеном дают друг другу 409: выключенный бот (bot.enabled) не опрашивает.
+        # _bot_ready() не трогаем — на нём держится и вход по второму фактору, ему enabled не нужен.
+        if not (cfg.bot.enabled and _bot_ready()):
             await asyncio.sleep(30)
             continue
         payload: dict[str, Any] = {
