@@ -1951,21 +1951,18 @@ def _read_traffic_rows(
     volume: the gap between consecutive rows is the period each sample
     stands for, and it is not necessarily today's refresh interval.
 
-    Raises csv.Error on corrupted files (e.g. NUL bytes), letting
-    callers skip that file instead of failing the whole calculation.
+    An unclean shutdown leaves runs of NUL bytes where records were lost
+    (seen on production logs: 103 NULs directly before an intact row).
+    Each run is treated as a line break, so the rows around it are still
+    counted and a record cut off before the NULs becomes a short row that
+    the column-count check below drops. Other unreadable input still
+    raises csv.Error / UnicodeDecodeError, letting callers skip the file.
     """
     rows: list[tuple[str, str, str, str]] = []
     with file_path.open(encoding="utf-8", newline="") as fh:
-        reader = csv.reader(fh)
+        reader = csv.reader(io.StringIO(fh.read().replace("\x00", "\n")))
         _ = next(reader, None)  # header
         for values in reader:
-            # csv.reader accepts NUL bytes and hands them back inside
-            # the fields, so a log truncated by a crash would otherwise
-            # feed \x00 into the traffic sums instead of being skipped.
-            if any("\x00" in value for value in values):
-                raise csv.Error(
-                    f"NUL byte in {file_path.name}, file is corrupted",
-                )
             # Handle mixed schemas in legacy files:
             # old: 12 columns, new: 15 columns.
             if len(values) >= 15:
