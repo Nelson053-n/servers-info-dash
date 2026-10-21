@@ -88,12 +88,13 @@ for s, o in [(f"st4 {p}", v) for p, v in st4.items()] + list(st.items()):
     net = o.get("net_pnl_rub") or 0
     net_total += net
     gap = o.get("execution_gap_rub")
-    gap_total += abs(gap or 0)
+    frozen = not live and not pos  # остановлен и flat: расхождение исторически замороженное, не тревога
+    gap_total += 0 if frozen else abs(gap or 0)
     state = "ok"
     if o.get("halted"):
         state = "bad"
         alerts.append({"severity": "bad", "text": f"{s}: остановлен — {o.get('halt_reason') or 'без причины'}"})
-    elif gap is not None and abs(gap) > 1000:
+    elif gap is not None and abs(gap) > 1000 and not frozen:
         state = "warn"
         alerts.append({"severity": "warn", "text": f"{s}: журнал расходится со счётом на {round(gap)} ₽"})
     elif o.get("trading_enabled") and not live and not o.get("paused_by_user") and forts_open(now_msk):
@@ -107,6 +108,49 @@ tables.append({"id": "strategies", "title": "Стратегии", "columns": [
     {"key": "live", "label": "Live"}, {"key": "mode", "label": "Счёт"}, {"key": "positions", "label": "Позиций", "num": True},
     {"key": "net", "label": "P&L всего, ₽", "num": True}, {"key": "gap", "label": "Расхождение, ₽", "num": True},
     {"key": "capital", "label": "Капитал, ₽", "num": True}], "rows": rows})
+
+# Реестр роботов: что за версия сейчас в коде и в каком статусе. Суть/вердикты — статичный текст
+# (источник: память проекта и CLAUDE.md trade4), режим/live/параметры/дата кода — живые.
+def code_date(n):
+    try:
+        out = subprocess.run(["git", "-C", "/opt/trade4", "log", "-1", "--format=%ad", "--date=short", "--", f"app/st{n}"],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+        return out or "—"
+    except Exception:
+        return "—"
+def js(o, keys):
+    return ", ".join(f"{k}={o[k]}" for k in keys if k in o)
+s6c, s7c = (st.get(k, {}).get("strategy") or {} for k in ("st6", "st7"))
+s8c = st.get("st8", {}).get("strategy_cfg") or {}
+s9i = st.get("st9", {}).get("instruments") or []
+st4a = next(iter(st4.values()), {})
+s5on = [p.get("pair") for p in st.get("st5", {}).get("pairs") or [] if p.get("enabled")]
+robots = [
+    ("st4", "BB-спред обычка/преф (SBRF/SBPR…)", "остановлен",
+     st4a.get("connector_mode"), f"Bollinger SMA{st4a.get('sma_period')}/{st4a.get('sigma_mult')}σ, пары: {', '.join(pairs) or '—'}",
+     "не жизнеспособен (вердикт 07.07)"),
+    ("st5", "statarb, Kalman-β/коинтеграция, портфель до 3 пар", "остановлен",
+     st.get("st5", {}).get("connector_mode"), f"включены пары: {', '.join(s5on) or '—'}; P&L по фактическим ногам (с 02.07)",
+     "не жизнеспособен; журнал завышал vs счёт (07.07)"),
+    ("st6", "фандинг-арбитраж: шорт перпа + лонг квартальника", "остановлен",
+     st.get("st6", {}).get("connector_mode"), js(s6c, ["edge_enter_pp", "edge_exit_pp", "units"]), "не жизнеспособен; сделок не было"),
+    ("st7", "фандинг-давление: полухедж-шорт перпа", "остановлен",
+     st.get("st7", {}).get("connector_mode"), js(s7c, ["fund_enter_pp", "fund_exit_pp", "units", "stop_loss_pct"]), "не жизнеспособен; сделок не было"),
+    ("st8", "дивидендный набег: лонг за ~10 дн до отсечки, хедж IMOEXF", "работает",
+     st.get("st8", {}).get("mode"), js(s8c, ["entry_days_before", "exit_offset_days", "min_div_yield_pct", "stop_loss_pct", "entry_notional_rub"]),
+     "лонг-нога t=2.32; шорт-нога — артефакт; сезонное межсезонье (авг. 1,2% отсечек, окт. 17,5%)"),
+    ("st9", "трендовая корзина перпов, Donchian+ATR 60м", "работает",
+     st.get("st9", {}).get("mode"),
+     "; ".join(f"{i.get('secid')} Donchian {i.get('don')}, {round((i.get('notional_rub') or 0) / 1000)}к" + ("" if i.get("entries_enabled", True) else " (входы выкл)") for i in s9i)
+     + f"; стоп просадки {st.get('st9', {}).get('capital_dd_stop_pct')}%",
+     "edge по плацебо реален, в деньгах не доказан (аудит 18.08); потолок ~13%/год"),
+]
+tables.append({"id": "robots", "title": "Версии роботов", "columns": [
+    {"key": "robot", "label": "Робот"}, {"key": "what", "label": "Суть"}, {"key": "status", "label": "Статус"},
+    {"key": "mode", "label": "Счёт"}, {"key": "params", "label": "Параметры сейчас"},
+    {"key": "code", "label": "Код изменён"}, {"key": "verdict", "label": "Вердикт"}],
+    "rows": [{"robot": r, "what": w, "status": "работает" if st.get(r, {}).get("live") else "остановлен", "mode": m or "—", "params": p or "—",
+              "code": code_date(r[2:]), "verdict": v} for r, w, _s, m, p, v in robots]})
 
 pos_rows = []
 for p in st.get("st6", {}).get("positions") or []:
