@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import shlex
 import socket
 import ssl
 import time
@@ -17,12 +18,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Literal
 
+import asyncssh
 import yaml
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("serverinfo.projects")
 
 CONFIG_PATH = Path("config/projects.yaml")
+SERVERS_PATH = Path("config/servers.yaml")
 _HTTP_TIMEOUT = 15
 _SLOW_MS = 3000
 _TLS_WARN_DAYS = 21
@@ -48,6 +51,9 @@ class ProjectConfig(BaseModel):
     stage: str = ""
     link: str | None = None
     check_url: str | None = None
+    # Имя сервера из servers.yaml: проверка сайта выполняется curl'ом на нём, а не с хоста панели
+    # (сайт, который пускает только отдельные страны/сети, иначе отвечает панели 403).
+    check_via: str | None = None
     tls_host: str | None = None
     note: str = ""
     analytics: SummarySource | None = None
@@ -92,6 +98,26 @@ def probe_http(url: str) -> dict[str, Any]:
     except urllib.error.HTTPError as exc:
         code, error = exc.code, None
     except Exception as exc:  # noqa: BLE001 — любой сбой сети = сайт недоступен
+        code, error = None, f"{type(exc).__name__}: {exc}"[:200]
+    return {"http": code, "ms": round((time.monotonic() - started) * 1000), "error": error}
+
+
+async def probe_via_server(url: str, server_name: str, servers_path: Path = SERVERS_PATH) -> dict[str, Any]:
+    """Как probe_http, но curl запускается по ssh на сервере server_name из servers.yaml."""
+    started = time.monotonic()
+    try:
+        servers = yaml.safe_load(servers_path.read_text(encoding="utf-8")) or {}
+        srv = next(x for x in servers["servers"] if x["name"] == server_name)
+        known_hosts = str(Path(servers["ssh"]["known_hosts"]).expanduser())
+        cmd = "curl -sS -o /dev/null -m 15 -w '%{http_code}' " + shlex.quote(url)
+        async with asyncssh.connect(
+            srv["host"], port=srv.get("port", 22), username=srv["user"],
+            client_keys=[srv["client_key"]], known_hosts=known_hosts, connect_timeout=10,
+        ) as conn:
+            res = await asyncio.wait_for(conn.run(cmd, check=False), timeout=30)
+        code = int(str(res.stdout).strip() or 0) or None   # 000 — curl не дозвонился
+        error = None if code else (str(res.stderr).strip() or "curl: нет ответа")[:200]
+    except Exception as exc:  # noqa: BLE001 — любой сбой = проверка не удалась
         code, error = None, f"{type(exc).__name__}: {exc}"[:200]
     return {"http": code, "ms": round((time.monotonic() - started) * 1000), "error": error}
 
@@ -204,7 +230,8 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
 async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
     async def one(p: ProjectConfig) -> dict[str, Any]:
         check, tls, doc = await asyncio.gather(
-            asyncio.to_thread(probe_http, p.check_url) if p.check_url else _none(),
+            (probe_via_server(p.check_url, p.check_via) if p.check_via else asyncio.to_thread(probe_http, p.check_url))
+            if p.check_url else _none(),
             asyncio.to_thread(tls_expiry, p.tls_host) if p.tls_host else _none(),
             asyncio.to_thread(fetch_analytics, p.analytics) if p.analytics else _none(),
         )

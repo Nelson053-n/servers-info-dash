@@ -153,3 +153,53 @@ def test_muted_alerts_are_dropped_and_do_not_color_the_project():
     keep = {"alerts": [{"severity": "warn", "text": "ТСПУ блокирует"}]}
     projects._drop_muted(keep, [])
     assert len(keep["alerts"]) == 1
+
+
+class _FakeConn:
+    def __init__(self, stdout, stderr=""):
+        self.cmd = None
+        self._res = type("R", (), {"stdout": stdout, "stderr": stderr})()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def run(self, cmd, check=False):
+        self.cmd = cmd
+        return self._res
+
+
+def _servers_file(tmp_path):
+    f = tmp_path / "servers.yaml"
+    f.write_text(
+        "ssh: {known_hosts: /kh}\nservers:\n- {name: KZ, host: 1.2.3.4, port: 22, user: monitor, client_key: /k}\n",
+        encoding="utf-8",
+    )
+    return f
+
+
+def test_check_via_runs_curl_on_remote_server(tmp_path, monkeypatch):
+    import asyncio
+    conn = _FakeConn("200")
+    seen = {}
+
+    def fake_connect(host, **kw):
+        seen.update(host=host, **kw)
+        return conn
+
+    monkeypatch.setattr(projects.asyncssh, "connect", fake_connect)
+    res = asyncio.run(projects.probe_via_server("https://x.test/healthz", "KZ", _servers_file(tmp_path)))
+    assert res["http"] == 200 and res["error"] is None
+    assert seen["host"] == "1.2.3.4" and seen["username"] == "monitor" and seen["known_hosts"] == "/kh"
+    assert "https://x.test/healthz" in conn.cmd
+
+
+def test_check_via_curl_failure_and_unknown_server(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(projects.asyncssh, "connect", lambda host, **kw: _FakeConn("000", "Could not resolve host"))
+    res = asyncio.run(projects.probe_via_server("https://x.test", "KZ", _servers_file(tmp_path)))
+    assert res["http"] is None and "resolve" in res["error"]
+    res = asyncio.run(projects.probe_via_server("https://x.test", "нет-такого", _servers_file(tmp_path)))
+    assert res["http"] is None and res["error"]
