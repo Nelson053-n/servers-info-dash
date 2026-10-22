@@ -26,10 +26,14 @@ const KIE_TOKEN_USD = 0.005;
     const r = await uf(url, o);
     return { status: r.status, body: (await r.json()) as any };
   };
-  try {
-    const j = await call('https://api.kie.ai/api/v1/chat/credit', keys.kieApiKey || '');
-    out.kie_usd = j.body?.code === 200 ? Number(j.body.data) * KIE_TOKEN_USD : null;
-  } catch { out.kie_usd = null; }
+  // один повтор: разовый сбой запроса иначе на час оставляет баланс пустым
+  out.kie_usd = null;
+  for (let attempt = 0; attempt < 2 && out.kie_usd === null; attempt++) {
+    try {
+      const j = await call('https://api.kie.ai/api/v1/chat/credit', keys.kieApiKey || '');
+      out.kie_usd = j.body?.code === 200 ? Number(j.body.data) * KIE_TOKEN_USD : null;
+    } catch { out.kie_usd = null; }
+  }
   try {
     const k = keys.openrouterGenerationKey || keys.openrouterSupportKey || '';
     const { status, body } = await call('https://openrouter.ai/api/v1/credits', k);

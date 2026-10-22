@@ -270,6 +270,9 @@ for key, label, floor in (("kie_usd", "Баланс kie.ai", 10), ("openrouter_u
                           ("google_usd", "Баланс Google AI", 20)):
     v = bal.get(key)
     if v is None:
+        if key in bal:   # сборщик балансов отработал, но этот баланс не получил
+            kpis.insert(4, {"id": key, "label": label, "value": "нет данных", "state": "warn",
+                            "hint": "запрос баланса не удался, повтор в начале следующего часа"})
         continue
     low = v < floor
     kpis.insert(4, {"id": key, "label": label, "value": v, "unit": "$", "state": "warn" if low else "ok",
