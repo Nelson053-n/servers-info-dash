@@ -308,7 +308,29 @@
   }
   function snooze(key) {
     try { const s = snoozed(); s[key] = Date.now() + 24 * 3600 * 1000; localStorage.setItem(SNOOZE_KEY, JSON.stringify(s)); }
-    catch (e) { /* приватный режим: отложить не получится, пункт останется */ }
+    catch (e) { /* приватный режим: закрыть не получится, пункт останется */ }
+    syncClosed();
+  }
+  function unsnooze(key) {
+    try { const s = snoozed(); delete s[key]; localStorage.setItem(SNOOZE_KEY, JSON.stringify(s)); }
+    catch (e) { /* ничего */ }
+    syncClosed();
+  }
+  function unsnoozeAll() {
+    try { localStorage.removeItem(SNOOZE_KEY); } catch (e) { /* ничего */ }
+    syncClosed();
+  }
+  /* Закрытые на сутки замечания проектов не считаются ни в статусе проекта, ни в счётчиках;
+     полный список остаётся в p.allIssues — его показывает вкладка «Задачи». */
+  const issueKey = (p, r) => "prj:" + p.id + ":" + r.text;
+  const stateOfIssues = (list) => list.some((r) => r.severity === "bad") ? "bad" : list.length ? "warn" : "ok";
+  function syncClosed() {
+    const hid = snoozed();
+    ((overview && overview.projects) || []).forEach((p) => {
+      if (!p.allIssues) p.allIssues = p.issues.slice();
+      p.issues = p.allIssues.filter((r) => !hid[issueKey(p, r)]);
+      p.state = stateOfIssues(p.issues);
+    });
   }
   /* Все матрицы связности из подробных документов проектов (сейчас — OneYearSolution). */
   const allMatrices = () => Object.values(details).flatMap((d) => (d && d.analytics && d.analytics.matrices) || []);
@@ -341,10 +363,10 @@
         items.push({key: "srv-disk:" + s.name, sev: "warn", title: `${s.name}: диск ${diskPct(s)} %`, text: `Свободно ${nf(s.disk_free_gb, 1)} ГБ из ${nf(s.disk_total_gb, 1)}.`, src: "серверы", href, kind: "server"});
       }
     });
-    (overview && overview.projects || []).forEach((p) => p.issues.forEach((r) => {
+    (overview && overview.projects || []).forEach((p) => (p.allIssues || p.issues).forEach((r) => {
       /* сроки сертификатов собираем ниже одним пунктом на дату */
       if (/^сертификат истекает/.test(r.text)) return;
-      items.push({key: "prj:" + p.id + ":" + r.text, sev: r.severity, title: r.text, text: "", src: p.name, href: "#projects/" + p.id, kind: "project"});
+      items.push({key: issueKey(p, r), sev: r.severity, title: r.text, text: "", src: p.name, href: "#projects/" + p.id, kind: "project"});
     }));
     const byDate = {};
     allCerts().forEach((c) => {
@@ -380,13 +402,13 @@
     const hidden = snoozed();
     const shown = items.filter((i) => !hidden[i.key]);
     const nHidden = items.length - shown.length;
-    const showAll = el("button", "btn small ghost", `Отложено: ${nHidden} — показать`);
+    const showAll = el("button", "btn small ghost", `Закрыто на сутки: ${nHidden} — показать`);
     showAll.type = "button";
-    showAll.addEventListener("click", () => { try { localStorage.removeItem(SNOOZE_KEY); } catch (e) { /* ничего */ } renderOverview(); });
+    showAll.addEventListener("click", () => { unsnoozeAll(); renderOverview(); renderRail(); });
     if (!shown.length) {
       /* нечего показывать — одна строка вместо пустой карточки */
       const bar = el("section", "attn-bar");
-      bar.append(el("span", "ins-dot ok"), el("span", null, items.length ? "Срочного нет — всё отложенное вернётся через сутки" : "Всё в норме, замечаний нет"));
+      bar.append(el("span", "ins-dot ok"), el("span", null, items.length ? "Срочного нет — закрытое вернётся через сутки" : "Всё в норме, замечаний нет"));
       if (nHidden) bar.append(showAll);
       return bar;
     }
@@ -410,7 +432,7 @@
     if (it.text) body.append(el("div", "ins-text", it.text));
     const acts = el("div", "ins-acts");
     const open = el("a", "btn small", it.kind === "server" ? "Открыть сервер" : "Открыть"); open.href = it.href;
-    const later = el("button", "btn small ghost", "Отложить на сутки"); later.type = "button";
+    const later = el("button", "btn small ghost", "Закрыть на сутки"); later.type = "button";
     later.addEventListener("click", () => { snooze(it.key); rerender(); renderRail(); });
     acts.append(open, later);
     body.append(acts);
@@ -439,13 +461,13 @@
     };
     group("Срочно", open.filter((i) => i.sev === "bad"));
     group("Проверить", open.filter((i) => i.sev !== "bad"));
-    if (!open.length) { const bar = el("section", "attn-bar"); bar.append(el("span", "ins-dot ok"), el("span", null, "Срочного нет — отложенное вернётся через сутки")); v.append(bar); }
+    if (!open.length) { const bar = el("section", "attn-bar"); bar.append(el("span", "ins-dot ok"), el("span", null, "Срочного нет — закрытое вернётся через сутки")); v.append(bar); }
     if (later.length) {
-      const back = el("button", "btn small ghost", "Вернуть все отложенные"); back.type = "button";
-      back.addEventListener("click", () => { try { localStorage.removeItem(SNOOZE_KEY); } catch (e) { /* ничего */ } renderTasks(); renderRail(); });
+      const back = el("button", "btn small ghost", "Вернуть все закрытые"); back.type = "button";
+      back.addEventListener("click", () => { unsnoozeAll(); renderTasks(); renderRail(); });
       const card = el("section", "card attn2");
       const head = el("div", "card-head");
-      head.append(el("h2", null, "Отложено"), el("span", "muted", later.length + " · вернутся через сутки"), back);
+      head.append(el("h2", null, "Закрыто на сутки"), el("span", "muted", later.length + " · вернутся через сутки"), back);
       card.append(head);
       const list = el("div", "ins-list");
       later.forEach((it) => { const r = el("div", "ins"), b = el("div", "ins-body"), t = el("div", "ins-top"); t.append(el("b", null, it.title), el("span", "ins-src", it.src)); b.append(t); r.append(el("span", "ins-dot " + it.sev), b); list.append(r); });
@@ -846,25 +868,61 @@
     v.append(grid);
   }
 
+  /* Колонка с «блок» в названии: значение «да» — блокировка, строка и ячейка красные. */
+  const isBlockCol = (c) => /блок/i.test(c.label || "");
+  const isYes = (v) => v === true || /^(да|yes|true)$/i.test(String(v == null ? "" : v).trim());
+  const SEV_ORDER = {bad: 0, warn: 1, ok: 2};
   function tableCard(tb) {
     const card = el("section", "card tcard");
     const head = el("div", "card-head"); head.append(el("h2", null, tb.title)); card.append(head);
     const wrap = el("div", "tscroll"), table = el("table", "ptable"), thead = el("thead"), hr = el("tr");
-    (tb.columns || []).forEach((c) => hr.append(el("th", c.num ? "num" : "", c.label)));
-    thead.append(hr);
-    const body = el("tbody");
-    (tb.rows || []).forEach((r) => {
-      const tr = el("tr");
-      (tb.columns || []).forEach((c) => {
-        const v = r[c.key], td = el("td", c.num ? "num" : "");
-        if (c.state) td.append(chip(v, {ok: "норма", warn: "внимание", bad: "проблема"}[v] || String(v)));
-        else if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) td.textContent = v.slice(8) + "." + v.slice(5, 7) + "." + v.slice(0, 4);
-        else td.textContent = v == null || v === "" ? "—" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
-        tr.append(td);
+    const cols = tb.columns || [], body = el("tbody");
+    let sortCol = null, asc = true;
+    const empty = (x) => x == null || x === "";
+    const cmp = (c, a, b) => {
+      const x = a[c.key], y = b[c.key];
+      if (empty(x) || empty(y)) return empty(x) && empty(y) ? 0 : empty(x) ? 1 : -1;   // пустые всегда внизу
+      const r = c.state ? (SEV_ORDER[x] ?? 9) - (SEV_ORDER[y] ?? 9)
+        : typeof x === "number" && typeof y === "number" ? x - y
+        : String(x).localeCompare(String(y), "ru", {numeric: true});
+      return asc ? r : -r;
+    };
+    const paintBody = () => {
+      body.textContent = "";
+      const rows = (tb.rows || []).slice();
+      if (sortCol) rows.sort((a, b) => cmp(sortCol, a, b));
+      rows.forEach((r) => {
+        const tr = el("tr");
+        if (cols.some((c) => isBlockCol(c) && isYes(r[c.key]))) tr.className = "blk";
+        cols.forEach((c) => {
+          const v = r[c.key], td = el("td", c.num ? "num" : "");
+          if (c.state) td.append(chip(v, {ok: "норма", warn: "внимание", bad: "проблема"}[v] || String(v)));
+          else if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) td.textContent = v.slice(8) + "." + v.slice(5, 7) + "." + v.slice(0, 4);
+          else td.textContent = v == null || v === "" ? "—" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
+          if (isBlockCol(c) && isYes(v)) td.classList.add("blocked");
+          tr.append(td);
+        });
+        body.append(tr);
       });
-      body.append(tr);
+      if (!(tb.rows || []).length) { const tr = el("tr"), td = el("td", "muted", "Пусто"); td.colSpan = cols.length || 1; tr.append(td); body.append(tr); }
+    };
+    cols.forEach((c) => {
+      const th = el("th", (c.num ? "num " : "") + "sortable"), arrow = el("span", "arrow");
+      th.append(document.createTextNode(c.label), arrow);
+      th.tabIndex = 0;
+      const go = () => {
+        if (sortCol === c) asc = !asc; else { sortCol = c; asc = true; }
+        hr.querySelectorAll("th").forEach((h) => { h.removeAttribute("aria-sort"); h.querySelector(".arrow").textContent = ""; });
+        th.setAttribute("aria-sort", asc ? "ascending" : "descending");
+        arrow.textContent = asc ? " \u25B2" : " \u25BC";
+        paintBody();
+      };
+      th.addEventListener("click", go);
+      th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+      hr.append(th);
     });
-    if (!(tb.rows || []).length) { const tr = el("tr"), td = el("td", "muted", "Пусто"); td.colSpan = (tb.columns || []).length || 1; tr.append(td); body.append(tr); }
+    thead.append(hr);
+    paintBody();
     table.append(thead, body); wrap.append(table); card.append(wrap);
     return card;
   }
@@ -885,11 +943,29 @@
     crumbs.append(a1, document.createTextNode(" / "), a2, document.createTextNode(" / " + p.name));
     v.append(crumbs);
     const right = el("div", "filters");
-    right.append(chip(p.state, p.state === "ok" ? "работает" : p.state === "warn" ? "есть замечания" : "проблема"));
+    const shownState = stateOfIssues(p.issues.filter((r) => !snoozed()[issueKey(p, r)]));
+    right.append(chip(shownState, shownState === "ok" ? "работает" : shownState === "warn" ? "есть замечания" : "проблема"));
     if (p.link) { const a = el("a", "btn", "Открыть сайт ↗"); a.href = p.link; a.target = "_blank"; a.rel = "noopener"; right.append(a); }
     const an = p.analytics;
     v.append(viewHead([p.stage, siteLine(p), an && an.age_min != null ? "данные " + ago(an.age_min) : ""].filter(Boolean).join(" · "), p.name, right));
-    p.issues.forEach((r) => { const d = el("div", "issue" + (r.severity === "bad" ? " bad" : "")); d.append(chip(r.severity, SEV[r.severity]), el("span", null, r.text)); v.append(d); });
+    const closedHere = [];
+    p.issues.forEach((r) => {
+      if (snoozed()[issueKey(p, r)]) { closedHere.push(r); return; }
+      const d = el("div", "issue" + (r.severity === "bad" ? " bad" : "")), x = el("button", "btn small ghost", "Закрыть на сутки");
+      x.type = "button";
+      x.addEventListener("click", () => { snooze(issueKey(p, r)); renderRail(); renderProject(id); });
+      d.append(chip(r.severity, SEV[r.severity]), el("span", null, r.text), x); v.append(d);
+    });
+    if (closedHere.length) {
+      const box = el("details", "issue-closed"), sum = el("summary", null, `Закрыто на сутки: ${closedHere.length}`);
+      box.append(sum);
+      closedHere.forEach((r) => {
+        const d = el("div", "issue closed"), b = el("button", "btn small ghost", "Вернуть"); b.type = "button";
+        b.addEventListener("click", () => { unsnooze(issueKey(p, r)); renderRail(); renderProject(id); });
+        d.append(chip(r.severity, SEV[r.severity]), el("span", null, r.text), b); box.append(d);
+      });
+      v.append(box);
+    }
     if (!an || an.error) { v.append(el("p", "muted", an && an.error ? an.error : "Подробная аналитика не подключена: видны сайт и сертификат.")); return; }
     if ((an.kpis || []).length) { const s = el("section", "stats"); s.setAttribute("aria-label", "Ключевые цифры"); an.kpis.forEach((k) => s.append(kpiStat(k))); v.append(s); }
     const blocks = [];
@@ -974,6 +1050,7 @@
       const next = {};
       want.forEach((p, i) => { if (got[i]) next[p.id] = got[i]; });
       details = next;
+      syncClosed();
       if (overview && overview.server_groups && JSON.stringify(window.infoServerGroups) !== JSON.stringify(overview.server_groups)) {
         window.infoServerGroups = overview.server_groups;
         if (typeof renderTable === "function") renderTable();

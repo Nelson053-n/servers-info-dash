@@ -1,5 +1,5 @@
 // Закладка «Задачи»: грузит index.html + app.js + views.js в jsdom с подставными
-// /api/projects и /api/metrics и проверяет, что открытые пункты видны, а отложенные уходят вниз.
+// /api/projects и /api/metrics и проверяет, что открытые пункты видны, а закрытые на сутки уходят вниз.
 //   npm i --no-save jsdom@24 && node tests/frontend_tasks.js
 const { JSDOM, VirtualConsole } = require("jsdom");
 const fs = require("fs");
@@ -39,11 +39,14 @@ setTimeout(() => {
     ["группа «Проверить»", text.includes("Проверить")],
     ["счётчик в меню", d.getElementById("cntTasks").textContent === "1"],
   ];
-  // отложить пункт → он уходит в «Отложено» и счётчик сбрасывается
+  // закрыть пункт → он уходит в «Закрыто на сутки», счётчики и статус проекта сбрасываются
   view.querySelector(".ins-acts .ghost").click();
   const after = d.getElementById("tasksView").textContent;
-  checks.push(["после «Отложить» пункт в блоке «Отложено»", after.includes("Отложено") && after.includes("Вернуть все отложенные")]);
-  checks.push(["счётчик после откладывания пуст", d.getElementById("cntTasks").textContent === ""]);
+  checks.push(["после «Закрыть на сутки» пункт в блоке «Закрыто на сутки»", after.includes("Закрыто на сутки") && after.includes("Вернуть все закрытые")]);
+  checks.push(["счётчик после закрытия пуст", d.getElementById("cntTasks").textContent === ""]);
+  checks.push(["проект без открытых замечаний в меню снова «ok»", d.querySelector("#railProjects .sdot").classList.contains("ok")]);
+  d.querySelector("#tasksView .attn2:last-of-type .ghost").click();
+  checks.push(["«Вернуть все закрытые» возвращает пункт", d.getElementById("cntTasks").textContent === "1" && d.querySelector("#railProjects .sdot").classList.contains("warn")]);
   let bad = errors.length;
   console.log("errors:", errors.length ? errors : "none");
   checks.forEach(([n, ok]) => { console.log((ok ? "ok   " : "FAIL ") + n); if (!ok) bad++; });
