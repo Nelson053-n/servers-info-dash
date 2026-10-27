@@ -397,7 +397,7 @@ function applyColor() {
   colorPick.querySelectorAll(".cdot").forEach(d => {
     d.classList.toggle("active", d.dataset.c === c);
   });
-  colorTrigger.style.background = "var(--muted)";
+  colorTrigger.style.background = colorGrads[c] || colorGrads.blue;
 }
 
 colorTrigger.addEventListener("click", (e) => {

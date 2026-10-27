@@ -9,7 +9,7 @@
   <link rel="apple-touch-icon" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/fonts.css?v=20261015">
   <link rel="stylesheet" href="/static/shell.css?v=20261015e">
-  <link rel="stylesheet" href="/static/tech.css?v=20261021e">
+  <link rel="stylesheet" href="/static/tech.css?v=20261027a">
 <style>
 :root{
   color-scheme:dark;
@@ -27,18 +27,18 @@
   --ok:#17935F;--warn:#B87100;--bad:#D23A2B;--accent:#3B556E;
   --ok-fg:#0F7A4D;--warn-fg:#8F5700;--bad-fg:#B02D20;
 }
-/* full colour themes — dark */
-:root.clr-purple{--bg:#1a1025;--panel:#1e1533;--line:#32234d;--accent:#8b5cf6}
-:root.clr-emerald{--bg:#0a1f1a;--panel:#0d2922;--line:#17413a;--accent:#10b981}
-:root.clr-rose{--bg:#1f0a14;--panel:#2a0e1c;--line:#4d1a34;--accent:#f43f5e}
-:root.clr-amber{--bg:#1a1408;--panel:#241c0c;--line:#3d3015;--accent:#f59e0b}
-:root.clr-cyan{--bg:#071a1f;--panel:#0b2228;--line:#153a43;--accent:#06b6d4}
-/* full colour themes — light */
-:root.light.clr-purple{--bg:#f5f0ff;--panel:#fff;--line:#d4bfff;--accent:#7c3aed}
-:root.light.clr-emerald{--bg:#ecfdf5;--panel:#fff;--line:#a7f3d0;--accent:#059669}
-:root.light.clr-rose{--bg:#fff1f2;--panel:#fff;--line:#fecdd3;--accent:#e11d48}
-:root.light.clr-amber{--bg:#fffbeb;--panel:#fff;--line:#fde68a;--accent:#d97706}
-:root.light.clr-cyan{--bg:#ecfeff;--panel:#fff;--line:#a5f3fc;--accent:#0891b2}
+/* акцентный цвет: меняется только --accent, поверхности (--bg/--panel/--rail/--line) остаются «стальными»,
+   иначе боковая панель и контент получали разные оттенки */
+:root.clr-purple{--accent:#8b5cf6}
+:root.clr-emerald{--accent:#10b981}
+:root.clr-rose{--accent:#f43f5e}
+:root.clr-amber{--accent:#f59e0b}
+:root.clr-cyan{--accent:#06b6d4}
+:root.light.clr-purple{--accent:#7c3aed}
+:root.light.clr-emerald{--accent:#059669}
+:root.light.clr-rose{--accent:#e11d48}
+:root.light.clr-amber{--accent:#d97706}
+:root.light.clr-cyan{--accent:#0891b2}
 
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
@@ -366,7 +366,7 @@ tr:last-child td{border-bottom:none}
   </div>
 </div>
 
-<script src="/static/app.js?v=20261015b"></script>
+<script src="/static/app.js?v=20261027a"></script>
 <script src="/static/views.js?v=20261021d"></script>
 </body>
 </html>
