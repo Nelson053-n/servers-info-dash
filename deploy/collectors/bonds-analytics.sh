@@ -111,19 +111,29 @@ tables.append({"id": "events", "title": "Ближайшие выплаты", "co
                                              "amortization": "Амортизация"}.get(e.get("type"), e.get("type")), "name": e.get("name") or e.get("ticker"), "amount": round(e.get("amount") or 0)} for e in upcoming]})
 
 # Смена рейтинга бумаг портфеля за 30 дней: последняя запись против предыдущей
-tickers = {i.get("ticker") for i in items if i.get("ticker")}
+names = {i["ticker"]: str(i.get("name") or "")[:40] for i in items if i.get("ticker")}
+tickers = set(names)
 changes = []
-for t in tickers:
+for t in sorted(tickers):
     hist = q("SELECT rating, recorded_at FROM rating_history WHERE ticker = ? ORDER BY recorded_at DESC LIMIT 2", t)
     if len(hist) == 2 and hist[0][0] != hist[1][0] and hist[0][1] >= days30[0]:
-        changes.append({"ticker": t, "was": hist[1][0], "now": hist[0][0], "date": hist[0][1][:10]})
+        changes.append({"ticker": t, "name": names[t], "was": hist[1][0], "now": hist[0][0], "date": hist[0][1][:10]})
 if changes:
     tables.append({"id": "ratings", "title": "Изменения рейтингов за 30 дней", "columns": [
-        {"key": "ticker", "label": "Бумага"}, {"key": "was", "label": "Было"}, {"key": "now", "label": "Стало"}, {"key": "date", "label": "Дата"}],
+        {"key": "ticker", "label": "Код"}, {"key": "name", "label": "Бумага"}, {"key": "was", "label": "Было"},
+        {"key": "now", "label": "Стало"}, {"key": "date", "label": "Дата"}],
         "rows": changes})
-    alerts.append({"severity": "warn", "text": f"Сменился рейтинг у {len(changes)} бумаг портфеля"})
+    # по алерту на бумагу: в замечании должно быть видно, какая именно
+    for c in changes[:5]:
+        alerts.append({"severity": "warn", "text": f"Рейтинг {c['ticker']} {c['name']}: {c['was']} → {c['now']}".replace("  ", " ")})
+    if len(changes) > 5:
+        alerts.append({"severity": "warn", "text": f"Ещё у {len(changes) - 5} бумаг сменился рейтинг (см. таблицу)"})
 for a in extra.get("anomalies") or []:
-    alerts.append({"severity": "warn", "text": str(a.get("text") or a.get("message") or a)[:160]})
+    text = str(a.get("text") or a.get("message") or a)
+    tkr = a.get("ticker")
+    if tkr and names.get(tkr) and text.startswith(tkr):   # в тексте API только код — добавляем название
+        text = f"{tkr} {names[tkr]}{text[len(tkr):]}"
+    alerts.append({"severity": "warn", "text": text[:200]})
 if os.environ.get("SVC") != "active":
     alerts.append({"severity": "bad", "text": f"сервис bondai: {os.environ.get('SVC') or 'unknown'}"})
 if "error" in (os.environ.get("DEPLOY_LAST") or "").lower() or "fail" in (os.environ.get("DEPLOY_LAST") or "").lower():
