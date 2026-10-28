@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>info — набор дизайна</title>
+<link rel="stylesheet" href="css/fonts.css">
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/shell.css">
+<link rel="stylesheet" href="css/tech.css">
+<link rel="stylesheet" href="css/base.css">
+<style>
+  /* только для демо-страницы: переключатели темы и акцента */
+  .demo-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .demo-bar .btn{min-height:30px}
+</style>
+</head>
+<body>
+<main class="content"><div class="view" id="demo"></div></main>
+<script src="js/charts.js"></script>
+<script>
+(function () {
+  const {el, kpiStat, chip, drawChart, fmtValue} = window.InfoUI;
+  const root = document.documentElement, demo = document.getElementById("demo");
+
+  /* ---- тестовые данные в формате analytics-schema.md ---- */
+  const months = ["2025-11","2025-12","2026-01","2026-02","2026-03","2026-04","2026-05","2026-06","2026-07","2026-08","2026-09","2026-10"];
+  const income = [26869,16832,22972,12080,18562,11909,14021,8433,9700,9515,10565,5544];
+  const days = Array.from({length: 30}, (_, i) => { const d = new Date(2026, 9, 29 - 29 + i); return d.toISOString().slice(0, 10); });
+  const price = days.map((d, i) => [d, +(0.0683 + Math.sin(i / 4) * 0.006 - i * 0.0001).toFixed(4)]);
+  const gens = days.map((d, i) => [d, 40 + ((i * 37) % 25)]), fails = days.map((d, i) => [d, (i * 11) % 9]);
+  const kpis = [
+    {label: "Курс FLUX", value: 0.0657, unit: "$", delta: 6.1, delta_label: "за 24 ч"},
+    {label: "Кошелёк", value: 113924, unit: "FLUX"},
+    {label: "Активно (CONFIRMED)", value: 9, unit: "из 9", state: "ok"},
+    {label: "Прошли тест", value: 7, unit: "из 9", state: "warn"},
+    {label: "Сервис", value: "работает"},
+    {label: "Ошибок за сутки", value: 41, unit: "%", state: "bad"},
+  ];
+
+  function section(title, hint) { const c = el("section", "card"); const h = el("div", "card-head"); h.append(el("h2", null, title), el("span", "muted", hint || "")); c.append(h); return c; }
+  function chartBox(card, chart, spark) { const box = el("div", "pj-chart"); card.append(box); requestAnimationFrame(() => drawChart(box, chart, spark ? {spark: true} : undefined)); return box; }
+
+  /* ---- панель демо ---- */
+  const bar = el("div", "demo-bar");
+  const mk = (t, fn) => { const b = el("button", "btn small", t); b.addEventListener("click", fn); bar.append(b); };
+  mk("тёмная / светлая", () => { root.classList.toggle("light"); });
+  ["blue", "purple", "emerald", "rose", "amber", "cyan"].forEach((c) => mk(c, () => { root.className = root.className.replace(/clr-\S+/g, "").trim() + " clr-" + c; }));
+  demo.append(el("div", "view-title", "info — набор дизайна"), bar);
+
+  /* ---- плитки ---- */
+  const stats = el("div", "stats");
+  kpis.forEach((k) => stats.append(kpiStat(k)));
+  demo.append(stats);
+
+  /* ---- карточка дохода (как на обзоре) ---- */
+  const money = el("section", "card money");
+  const mh = el("div", "card-head"); mh.append(el("h2", null, "FluxRadar — доход"), el("span", "muted", "487 FLUX + 487 PA по курсу FLUX и ЦБ на день получения")); money.append(mh);
+  const row = el("div", "money-row");
+  const main = el("div"); main.append(el("div", "stat-label", "Доход нод с 1 октября"), el("div", "money-value", fmtValue(5544, "₽")));
+  const delta = el("div", "money-delta"); delta.append(el("div", "pos", "▲ +8,2 % к 1–28 сентября"));
+  const prev = el("div"); prev.append(el("div", "stat-label", "Доход нод за сентябрь"), el("div", "money-prev", fmtValue(10565, "₽")));
+  row.append(main, delta, prev); money.append(row);
+  chartBox(money, {kind: "bar", unit: "₽", series: [{name: "₽", points: months.map((m, i) => [m, income[i]])}]});
+  money.append(el("div", "money-ytd", "С начала года: " + fmtValue(income.slice(2).reduce((a, b) => a + b, 0), "₽")));
+  demo.append(money);
+
+  /* ---- линия, столбики со стеком ---- */
+  const g = el("div", "grid2");
+  const c1 = section("Курс FLUX за 30 дней", "line: уровень далеко от нуля — ось по диапазону"); chartBox(c1, {kind: "line", unit: "$", series: [{name: "$", points: price}]});
+  const c2 = section("Генерации по дням", "bar со стеком; серия «failed» красная автоматически"); chartBox(c2, {kind: "bar", unit: "шт", series: [{name: "DONE", points: gens}, {name: "failed", points: fails}]});
+  g.append(c1, c2); demo.append(g);
+
+  /* ---- таблица с цветными статусами ---- */
+  const tc = section("Наши ноды", "колонка с state рисуется цветной меткой");
+  const rows = [["91.239.23.95:16147", "Nimbus", "Riga", "ok", 212], ["91.239.23.95:16187", "Nimbus", "Riga", "ok", 639], ["178.236.16.152:16197", "Nimbus", "Astana", "warn", 1251], ["178.236.16.152:16167", "Cumulus", "Astana", "bad", 1189]];
+  const tbl = el("table", "ptable"), thead = el("thead"), hr = el("tr");
+  ["Адрес", "Тир", "Город", "Статус", "Ранг"].forEach((h, i) => { const th = el("th", i === 4 ? "num" : null, h); hr.append(th); });
+  thead.append(hr); tbl.append(thead);
+  const tb = el("tbody");
+  rows.forEach((r) => { const tr = el("tr"); r.forEach((c, i) => { const td = el("td", i === 4 ? "num" : null); if (i === 3) td.append(chip(c)); else td.textContent = c; tr.append(td); }); tb.append(tr); });
+  tbl.append(tb); tc.append(tbl); demo.append(tc);
+
+})();
+</script>
+</body>
+</html>

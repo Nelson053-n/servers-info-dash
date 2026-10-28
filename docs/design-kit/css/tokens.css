@@ -1,0 +1,29 @@
+/* Токены: тёмная тема по умолчанию, :root.light — светлая, :root.clr-* — акцент (меняется только --accent). */
+:root{
+  color-scheme:dark;
+  --bg:#090B0E;--panel:#0E1217;--panel2:#141A21;--rail:#07090B;--line:#1C242D;--line2:#151B22;
+  --text:#E4E9EE;--text2:#B4BEC9;--muted:#76828F;--faint:#505B67;
+  --ok:#35D399;--warn:#F0B030;--bad:#FF5444;--accent:#A9BDD0;
+  --ok-fg:#5BE0AE;--warn-fg:#F5C35A;--bad-fg:#FF8073;
+  --mono:'Martian Mono','IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  --sans:'IBM Plex Sans','Segoe UI',system-ui,sans-serif;
+}
+:root.light{
+  color-scheme:light;
+  --bg:#E8ECEF;--panel:#F6F8F9;--panel2:#E2E7EB;--rail:#DCE2E7;--line:#C6CED6;--line2:#D4DAE0;
+  --text:#11171D;--text2:#2B3641;--muted:#58646F;--faint:#85909B;
+  --ok:#17935F;--warn:#B87100;--bad:#D23A2B;--accent:#3B556E;
+  --ok-fg:#0F7A4D;--warn-fg:#8F5700;--bad-fg:#B02D20;
+}
+/* акцентный цвет: меняется только --accent, поверхности (--bg/--panel/--rail/--line) остаются «стальными»,
+   иначе боковая панель и контент получали разные оттенки */
+:root.clr-purple{--accent:#8b5cf6}
+:root.clr-emerald{--accent:#10b981}
+:root.clr-rose{--accent:#f43f5e}
+:root.clr-amber{--accent:#f59e0b}
+:root.clr-cyan{--accent:#06b6d4}
+:root.light.clr-purple{--accent:#7c3aed}
+:root.light.clr-emerald{--accent:#059669}
+:root.light.clr-rose{--accent:#e11d48}
+:root.light.clr-amber{--accent:#d97706}
+:root.light.clr-cyan{--accent:#0891b2}
