@@ -261,6 +261,7 @@ a.pcard.bad{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
 .money-value{font-family:var(--mono);font-size:34px;line-height:1.1}
 .money-prev{font-family:var(--mono);font-size:16px}
 .money-delta{padding-bottom:6px;font-size:13px}
+.money-ytd{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-family:var(--mono);font-size:15px}
 .pos{color:var(--ok-fg)}.neg{color:var(--bad-fg)}
 .money-chart{min-height:180px}
 .matrix.ping .mc{height:28px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text)}

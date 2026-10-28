@@ -500,6 +500,10 @@
       if (prev) { const p = el("div"); p.append(el("div", "stat-label", prev.label), el("div", "money-prev", fmtValue(prev.value, prev.unit))); row.append(p); }
       card.append(row);
       if (chart) { const box = el("div", "pj-chart money-chart"); card.append(box); requestAnimationFrame(() => drawChart(box, chart)); }
+      /* окно графика — 12 месяцев, то есть текущий год он покрывает целиком */
+      const year = String(new Date().getFullYear());
+      const ytd = ((chart && chart.series && chart.series[0] && chart.series[0].points) || []).filter((p) => String(p[0]).slice(0, 4) === year);
+      if (ytd.length) card.append(el("div", "money-ytd", "С начала года: " + fmtValue(ytd.reduce((s, p) => s + (Number(p[1]) || 0), 0), k.unit)));
       out.push(card);
     });
     return out;
