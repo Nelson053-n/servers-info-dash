@@ -204,7 +204,10 @@ if by_usd:
             usd = by_usd.get(day) or by_usd[max(d for d in by_usd if d <= day)] if day >= first_day else None
             r = rate.get(day) or next((rate[d] for d in sorted(rate, reverse=True) if d <= day), None)
             return None if usd is None or r is None else usd * r
-        flux_m, rub_m = {}, {}
+        # Parallel Assets: каждая из PA-сетей даёт +10 % к каждой награде (fusion: maxClaimablePerChain = 10 % от всех наград
+        # на адрес); начисляется независимо от того, выведено или нет. Число сетей берём из сводки кошелька.
+        pa_k = 0.1 * len((wallet or {}).get("pa_chains") or [])
+        flux_m, pa_m, rub_m = {}, {}, {}
         for ts, val in rewards.values():
             day = dt.datetime.fromtimestamp(ts, dt.timezone.utc).date()
             rr = rub_at(day)
@@ -212,7 +215,8 @@ if by_usd:
                 continue
             m = dt.datetime.fromtimestamp(ts, VL).strftime("%Y-%m")
             flux_m[m] = flux_m.get(m, 0) + val
-            rub_m[m] = rub_m.get(m, 0) + val * rr
+            pa_m[m] = pa_m.get(m, 0) + val * pa_k
+            rub_m[m] = rub_m.get(m, 0) + val * (1 + pa_k) * rr
         now_l = dt.datetime.now(VL)
         months = []
         y, mo = now_l.year, now_l.month
@@ -227,20 +231,24 @@ if by_usd:
         months = [m for m in months if m >= full_from]
         cur, prev = now_l.strftime("%Y-%m"), (now_l.replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
         kpis.append({"id": "revenue_month", "label": f"Доход нод с 1 {MONTHS_GEN[now_l.month - 1]}", "value": round(rub_m.get(cur, 0)), "unit": "₽",
-                     "hint": f"{round(flux_m.get(cur, 0))} FLUX по курсу FLUX и ЦБ на день выплаты; месяц по Владивостоку"})
+                     "hint": f"{round(flux_m.get(cur, 0))} FLUX + {round(pa_m.get(cur, 0))} PA по курсу FLUX и ЦБ на день получения; месяц по Владивостоку"})
         pm = int(prev[5:]) - 1
         if prev in flux_m or prev in months:
             kpis.append({"id": "revenue_prev_month", "label": f"Доход нод за {MONTHS_ACC[pm]}", "value": round(rub_m.get(prev, 0)), "unit": "₽"})
         charts.insert(0, {"id": "revenue_monthly", "title": "Доход нод по месяцам", "kind": "bar", "unit": "₽",
-                          "note": "награды нод в рублях по курсу на день выплаты; текущий месяц неполный",
+                          "note": "награды нод + Parallel Assets (начислено, без учёта вывода) в рублях по курсу на день получения; текущий месяц неполный",
                           "series": [{"name": "₽", "points": [[m, round(rub_m.get(m, 0))] for m in months]}]})
         charts.insert(1, {"id": "income_flux_monthly", "title": "Доход нод по месяцам, FLUX", "kind": "bar", "unit": "FLUX",
-                          "series": [{"name": "FLUX", "points": [[m, round(flux_m.get(m, 0), 1)] for m in months]}]})
+                          "note": "начислено: награды нод и Parallel Assets, без учёта вывода",
+                          "series": [{"name": "награды", "points": [[m, round(flux_m.get(m, 0), 1)] for m in months]},
+                                     {"name": "PA", "points": [[m, round(pa_m.get(m, 0), 1)] for m in months]}]})
         tables.append({"id": "income_months", "title": "Доход нод по месяцам",
-                       "columns": [{"key": "month", "label": "Месяц"}, {"key": "flux", "label": "FLUX", "num": True},
+                       "columns": [{"key": "month", "label": "Месяц"}, {"key": "flux", "label": "Награды, FLUX", "num": True},
+                                   {"key": "pa", "label": "PA, FLUX", "num": True}, {"key": "total", "label": "Всего, FLUX", "num": True},
                                    {"key": "rub", "label": "₽", "num": True}, {"key": "avg", "label": "Средний курс, ₽/FLUX", "num": True}],
-                       "rows": [{"month": m, "flux": round(flux_m.get(m, 0), 1), "rub": round(rub_m.get(m, 0)),
-                                 "avg": round(rub_m[m] / flux_m[m], 2) if flux_m.get(m) else None} for m in reversed(months)]})
+                       "rows": [{"month": m, "flux": round(flux_m.get(m, 0), 1), "pa": round(pa_m.get(m, 0), 1),
+                                 "total": round(flux_m.get(m, 0) + pa_m.get(m, 0), 1), "rub": round(rub_m.get(m, 0)),
+                                 "avg": round(rub_m[m] / (flux_m[m] + pa_m[m]), 2) if flux_m.get(m) else None} for m in reversed(months)]})
         if backfill:
             alerts.append({"severity": "warn", "text": "История наград догружается из эксплорера, цифры по старым месяцам неполные"})
     else:
