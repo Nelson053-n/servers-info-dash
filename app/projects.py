@@ -260,7 +260,9 @@ _cache: dict[str, Any] = {"generated_at": None, "projects": [], "tls": [], "read
 
 
 def _card(doc: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Для обзора — первые 4 плитки и первый график; полный документ — в detail()."""
+    """Для обзора — первые 4 плитки и первый график; полный документ — в detail().
+    Флаг has_revenue_month — по нему обзор решает, грузить ли полный документ для карточки «доход»:
+    сама плитка может стоять дальше четвёртой и в сводку не попасть."""
     if not doc:
         return None
     charts = doc.get("charts") or []
@@ -269,6 +271,7 @@ def _card(doc: dict[str, Any] | None) -> dict[str, Any] | None:
         "stale": doc.get("stale"),
         "age_min": doc.get("age_min"),
         "kpis": (doc.get("kpis") or [])[:4],
+        "has_revenue_month": any(k.get("id") == "revenue_month" for k in doc.get("kpis") or []),
         "spark": charts[0] if charts else None,
         # для сводки «выручка всех проектов» на обзоре — по договорённому id
         "revenue_30d": next((k.get("value") for k in doc.get("kpis") or []

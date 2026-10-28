@@ -1045,7 +1045,7 @@
       if (pr.ok) overview = await pr.json();
       if (mr.ok) metrics = await mr.json();
       /* обзору нужны подробные документы проектов с доходом по месяцам (там же матрица связности) */
-      const want = ((overview && overview.projects) || []).filter((p) => p.analytics && (p.analytics.kpis || []).some((k) => k.id === "revenue_month"));
+      const want = ((overview && overview.projects) || []).filter((p) => p.analytics && p.analytics.has_revenue_month);
       const got = await Promise.all(want.map((p) => fetch("/api/projects/" + p.id, {cache: "no-store"}).then((r) => r.ok ? r.json() : null).catch(() => null)));
       const next = {};
       want.forEach((p, i) => { if (got[i]) next[p.id] = got[i]; });

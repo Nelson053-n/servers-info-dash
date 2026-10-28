@@ -203,3 +203,11 @@ def test_check_via_curl_failure_and_unknown_server(tmp_path, monkeypatch):
     assert res["http"] is None and "resolve" in res["error"]
     res = asyncio.run(projects.probe_via_server("https://x.test", "нет-такого", _servers_file(tmp_path)))
     assert res["http"] is None and res["error"]
+
+
+def test_card_flags_revenue_month_even_beyond_first_four_kpis():
+    kpis = [{"id": f"k{i}", "label": "x", "value": i} for i in range(6)] + [{"id": "revenue_month", "label": "x", "value": 1}]
+    card = projects._card({"kpis": kpis, "charts": []})
+    assert len(card["kpis"]) == 4
+    assert card["has_revenue_month"] is True
+    assert projects._card({"kpis": kpis[:3], "charts": []})["has_revenue_month"] is False
