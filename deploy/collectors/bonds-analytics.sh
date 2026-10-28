@@ -13,6 +13,37 @@ export TOK OWNER_ID
 export SVC=$(systemctl is-active bondai 2>/dev/null)
 export DEPLOY_LAST=$(tail -1 /var/log/bondai-autodeploy.log 2>/dev/null | cut -c1-160)
 mkdir -p "$OUT_DIR"
+# Купоны по месяцам: журнал операций брокера (только чтение) за 5 лет, не чаще раза в 6 часов.
+# Токен расшифровывается ключом приложения, живёт только в памяти этого процесса и никуда не пишется.
+export COUPONS_CACHE=${COUPONS_CACHE:-/var/lib/infodash/bonds-coupons.json}
+if [ -z "$(find "$COUPONS_CACHE" -mmin -360 2>/dev/null)" ]; then
+  (cd "$APP" && set -a && . ./.env && set +a && .venv/bin/python3 - <<'PY'
+import asyncio, datetime as dt, json, os, sqlite3
+from app.services.crypto_utils import decrypt_token
+from app.services.tbank_service import TBankService
+VL = dt.timezone(dt.timedelta(hours=10))
+db = sqlite3.connect("file:data/portfolio.db?mode=ro", uri=True)
+rows = db.execute("SELECT s.tbank_token_enc, s.tbank_account_id FROM portfolio_sync s JOIN portfolios p ON p.id = s.portfolio_id "
+                  "WHERE p.user_id = ? AND s.sync_enabled = 1", (int(os.environ.get("OWNER_ID", "1")),)).fetchall()
+
+async def main():
+    now = dt.datetime.now(dt.timezone.utc)
+    months = {}
+    for enc, account in rows:
+        ops = await TBankService(decrypt_token(enc)).get_operations(account, now.replace(year=now.year - 5).isoformat(), now.isoformat())
+        for o in ops:
+            if o["operation_type"] == "OPERATION_TYPE_COUPON" and o["date"]:
+                m = dt.datetime.fromisoformat(o["date"].replace("Z", "+00:00")).astimezone(VL).strftime("%Y-%m")
+                months[m] = months.get(m, 0) + o["payment"]
+    path = os.environ["COUPONS_CACHE"]
+    with open(path + ".tmp", "w") as fh:
+        json.dump({"months": {k: round(v, 2) for k, v in months.items()}, "updated": now.isoformat(timespec="seconds")}, fh)
+    os.replace(path + ".tmp", path)
+
+asyncio.run(main())
+PY
+  ) 2>/dev/null
+fi
 cd "$APP" && .venv/bin/python3 - "$OUT_DIR/bonds.json" <<'PY'
 import datetime as dt, json, os, sqlite3, sys, urllib.request
 VL = dt.timezone(dt.timedelta(hours=10))
@@ -138,6 +169,33 @@ if os.environ.get("SVC") != "active":
     alerts.append({"severity": "bad", "text": f"сервис bondai: {os.environ.get('SVC') or 'unknown'}"})
 if "error" in (os.environ.get("DEPLOY_LAST") or "").lower() or "fail" in (os.environ.get("DEPLOY_LAST") or "").lower():
     alerts.append({"severity": "warn", "text": "Автодеплой: " + os.environ["DEPLOY_LAST"]})
+
+# ── Доход по месяцам: купоны из журнала операций (кэш пишет блок выше) ──
+MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+MONTHS_ACC = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+try:
+    cm = json.load(open(os.environ["COUPONS_CACHE"]))["months"]
+except (OSError, ValueError, KeyError):
+    cm = None
+if cm is None:
+    alerts.append({"severity": "warn", "text": "Купоны по месяцам не получены: журнал операций брокера недоступен"})
+else:
+    now_l = dt.datetime.now(VL)
+    mkeys, y, mo = [], now_l.year, now_l.month
+    for _ in range(12):
+        mkeys.append("%04d-%02d" % (y, mo))
+        mo -= 1
+        if mo == 0:
+            y, mo = y - 1, 12
+    mkeys.reverse()
+    cur = mkeys[-1]
+    prev = mkeys[-2]
+    kpis.append({"id": "revenue_month", "label": f"Купоны с 1 {MONTHS_GEN[now_l.month - 1]}", "value": round(cm.get(cur, 0)), "unit": "₽",
+                 "hint": "выплаты по журналу операций брокера, месяц по Владивостоку"})
+    kpis.append({"id": "revenue_prev_month", "label": f"Купоны за {MONTHS_ACC[int(prev[5:]) - 1]}", "value": round(cm.get(prev, 0)), "unit": "₽"})
+    charts.insert(0, {"id": "revenue_monthly", "title": "Купоны по месяцам", "kind": "bar", "unit": "₽",
+                      "note": "фактические выплаты купонов; текущий месяц неполный",
+                      "series": [{"name": "₽", "points": [[m, round(cm.get(m, 0))] for m in mkeys]}]})
 
 doc = {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
        "kpis": [k for k in kpis if k.get("value") is not None], "charts": charts, "tables": tables, "alerts": alerts}
