@@ -93,8 +93,12 @@
     const states = {historical: "исторические данные", snapshot: "историческая копия", not_applicable: "не применимо", stale_error: "устарело / ошибка", unknown: "нет данных", partial: "неполно", stale: "устарело", error: "ошибка источника"};
     const provenance = [states[k.status], metaText(k.period), metaText(k.source),
       k.last_success ? "успешно: " + new Date(k.last_success).toLocaleString("ru-RU") : null, k.error].filter(Boolean).join(" · ");
-    const item = stat(k.label, txt, {state: k.state || (k.status && k.status !== "ok" ? "warn" : "ok"), long: isLong(txt), note, noteCls});
-    if (states[k.status]) item.append(el("span", "metric-status", states[k.status]));
+    const item = stat(label(k.label), txt, {state: k.state || (k.status && k.status !== "ok" ? "warn" : "ok"), long: isLong(txt), note, noteCls});
+    const fresh = stamp(k.last_success || k.generated_at);
+    const meta = el("span", "metric-meta");
+    if (states[k.status]) meta.append(el("span", "metric-status", states[k.status]));
+    if (fresh) meta.append(el("span", "metric-time", fresh));
+    if (meta.children.length) item.append(meta);
     if (provenance || k.hint) {
       const info = disclosure("metric:" + current.id + ":" + k.id, "metric-info", "Источник и период");
       info.append(el("p", null, [k.hint, provenance].filter(Boolean).join(" · ")));
@@ -112,9 +116,33 @@
       flux: ["my_active", "balance_flux", "mined", "pa_claimable", "price", "fleet_uptime"],
       "info-public": ["projects", "sources_with_success", "incomplete_sources"],
     };
-    const first = (preferred[projectId] || []).map((id) => relevant.find((k) => k.id === id)).filter(Boolean);
-    const rest = relevant.filter((k) => !first.includes(k));
-    return first.concat(rest.filter((k) => k.value != null), rest.filter((k) => k.value == null)).slice(0, limit);
+    /* В первые ряды попадают только показатели со значением; пустые собираются в missingKpis() одной строкой. */
+    const known = relevant.filter((k) => k.value != null && k.value !== "");
+    const first = (preferred[projectId] || []).map((id) => known.find((k) => k.id === id)).filter(Boolean);
+    return first.concat(known.filter((k) => !first.includes(k))).slice(0, limit);
+  }
+  const label = (t) => String(t || "").replace(/за(\d)/g, "за $1").replace(/(\d)(дн|ч|мин)/g, "$1 $2");
+  const missingKpis = (kpis) => (kpis || []).filter((k) => k.status !== "not_applicable" && (k.value == null || k.value === ""));
+  /* Свежесть одной цифры: «15:14» сегодня, «06.11 15:14» раньше. */
+  function stamp(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d)) return "";
+    const hm = d.toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit"});
+    const p2 = (n) => String(n).padStart(2, "0");
+    return d.toDateString() === new Date().toDateString() ? hm : p2(d.getDate()) + "." + p2(d.getMonth() + 1) + " " + hm;
+  }
+  function missingBlock(list, key) {
+    const box = disclosure(key, "technical-section kpi-missing", "Нет источника данных · " + list.length + " — " +
+      list.slice(0, 4).map((k) => label(k.label)).join(", ") + (list.length > 4 ? "…" : ""));
+    const ul = el("ul", "missing-list");
+    list.forEach((k) => {
+      const li = el("li");
+      li.append(el("b", null, label(k.label)), el("span", "muted", k.error || k.hint || "значение не получено"));
+      ul.append(li);
+    });
+    box.append(ul);
+    return box;
   }
 
   function metricCaption(k) {
@@ -269,24 +297,43 @@
   /* ---------- общие блоки ---------- */
   function siteLine(p) {
     const parts = [];
-    if (p.check) parts.push(p.check.http == null ? "сайт не отвечает" : p.check.http + " · " + nf(p.check.ms, 0) + " мс");
+    if (p.check) parts.push(p.check.http == null ? "сайт не отвечает" : "HTTP " + p.check.http + " · " + nf(p.check.ms, 0) + " мс");
     if (p.tls) parts.push(p.tls.error ? "TLS: ошибка" : "TLS " + p.tls.days_left + " дн");
     return parts.join(" · ");
   }
+  /* Возраст сводки проекта: «данные 4 мин» (или «устарели 3 ч» — тогда предупреждение). */
+  function freshness(a) {
+    if (!a || a.age_min == null) return null;
+    const s = el("span", "fresh" + (a.stale ? " stale" : ""), (a.stale ? "устарели " : "данные ") + ago(a.age_min).replace(" назад", ""));
+    s.title = a.generated_at ? "Сводка сформирована " + new Date(a.generated_at).toLocaleString("ru-RU") : "";
+    return s;
+  }
+  /* Единая надпись статуса проекта для всех разделов + отдельная метка режима (восстановление, тест). */
+  const STATE_TEXT = {ok: "норма", warn: "замечания", bad: "проблема"};
+  const stateChip = (state) => chip(state, STATE_TEXT[state] || state);
+  function modeTag(p) {
+    const s = p.stage || "";
+    const mode = /восстановл|из копии|без prod/i.test(s) ? "восстановление" : /тест/i.test(s) ? "тест" : null;
+    return mode ? el("span", "mode-tag", mode) : null;
+  }
   function projectCard(p) {
-    const a = p.analytics;
+    const full = (details[p.id] || {}).analytics;
+    const a = full || p.analytics;
     const card = el("a", "pcard " + p.state);
     card.href = "#projects/" + p.id;
     const top = el("div", "pcard-top"), nm = el("div");
-    nm.append(el("div", "pcard-name", p.name), el("div", "pcard-sub", p.stage || ""));
-    top.append(nm, chip(p.state));
+    const title = el("div", "pcard-name", p.name);
+    const tag = modeTag(p); if (tag) title.append(tag);
+    nm.append(title, el("div", "pcard-sub", p.stage || ""));
+    top.append(nm, stateChip(p.state));
     card.append(top);
-    if (a && a.kpis && a.kpis.length) {
+    const shown = a ? primaryKpis(a.kpis, 4, p.id) : [];
+    if (shown.length) {
       const k = el("div", "pcard-kpis");
-      primaryKpis(a.kpis, 4, p.id).forEach((x) => {
+      shown.forEach((x) => {
         const cell = el("div");
         const txt = fmtValue(x.value, x.unit);
-        cell.append(el("div", "pk-label", x.label), el("div", "pk-value" + (isLong(txt) ? " long" : "") + (x.state && x.state !== "ok" ? " " + x.state : ""), txt));
+        cell.append(el("div", "pk-label", label(x.label)), el("div", "pk-value" + (isLong(txt) ? " long" : "") + (x.state && x.state !== "ok" ? " " + x.state : ""), txt));
         if (typeof x.delta === "number") cell.append(el("div", "pk-delta " + (x.delta >= 0 ? "pos" : "neg"), (x.delta >= 0 ? "+" : "") + nf(x.delta, 1) + " %"));
         k.append(cell);
       });
@@ -294,12 +341,18 @@
     } else {
       card.append(el("p", "muted", "Аналитика пока недоступна"));
     }
-    if (a && a.spark) {
+    const nMissing = full ? missingKpis(full.kpis).length : (a && a.kpi_missing) || 0;
+    if (nMissing) card.append(el("div", "pcard-missing", "+ " + nMissing + " " + plural(nMissing, "показатель", "показателя", "показателей") + " без источника"));
+    const spark = (p.analytics && p.analytics.spark) || (full && full.charts && full.charts[0]);
+    if (spark) {
       const sp = el("div", "pcard-spark");
       card.append(sp);
-      requestAnimationFrame(() => drawChart(sp, a.spark, {spark: true}));
+      requestAnimationFrame(() => drawChart(sp, spark, {spark: true}));
     }
-    card.append(el("div", "pcard-foot", siteLine(p)));
+    const foot = el("div", "pcard-foot");
+    foot.append(el("span", null, siteLine(p)));
+    const fr = freshness(p.analytics); if (fr) foot.append(fr);
+    card.append(foot);
     return card;
   }
   function allCerts() {
@@ -405,19 +458,34 @@
     })));
     return out;
   }
+  /* Лучший пинг до VPN-выхода с любого РФ-входа (из матрицы связности панели): {имя сервера: мс}.
+     У нод из панели нет своего пинга — это единственное реальное измерение задержки до них. */
+  function exitPing() {
+    const best = {};
+    allMatrices().forEach((mx) => (mx.rows || []).forEach((r) => (r.cells || []).forEach((c) => {
+      const parts = String(c.title || "").split(" · ");
+      const m = c.state === "ok" && (parts[2] || "").match(/(\d+)\s*мс/);
+      if (m && parts[1]) best[parts[1]] = Math.min(best[parts[1]] ?? Infinity, Number(m[1]));
+    })));
+    return best;
+  }
   function insights() {
     const items = [];
     (metrics && metrics.servers || []).forEach((s) => {
       const href = "#servers/" + encodeURIComponent(s.name);
       if (s.status !== "up") {
         const exits = liveExitsVia(s.name);
-        let text = "Мониторинг не получает данные по SSH.";
+        const via = s.metrics_source === "tcp-probe" ? "tcp" : /server_metrics/.test(s.metrics_source || "") ? "panel" : "ssh";
+        const aka = (s.aliases || []).length ? ` В панели та же машина ещё как: ${s.aliases.join(", ")}.` : "";
+        let text = (via === "panel" ? `Панель не получает метрики ноды${s.panel_status ? " (статус в панели: " + s.panel_status + ")" : ""}.`
+          : via === "tcp" ? (s.error || "TCP-проверка не прошла.") : "Мониторинг не получает данные по SSH.") + aka;
         if (exits.length) {
           const best = exits.filter((e) => e.ping != null).sort((a, b) => a.ping - b.ping)[0] || exits[0];
           text = `VPN-выход ${best.exit} через этот сервер при этом жив` + (best.ping != null ? `: пинг ${best.ping} мс с ${best.copy}` : "") +
-            ". Клиенты не страдают — не работает канал мониторинга.";
+            ". Клиенты не страдают — не работает канал мониторинга." + aka;
         }
-        items.push({key: "srv-down:" + s.name, sev: "bad", title: s.name + ": SSH не отвечает", text, src: "серверы", href, kind: "server"});
+        const title = s.name + (via === "panel" ? ": нет метрик из панели" : via === "tcp" ? ": сервис не отвечает" : ": SSH не отвечает");
+        items.push({key: "srv-down:" + s.name, sev: "bad", title, text, src: "серверы", href, kind: "server"});
       } else if (diskPct(s) >= 85) {
         items.push({key: "srv-disk:" + s.name, sev: "warn", title: `${s.name}: диск ${diskPct(s)} %`, text: `Свободно ${nf(s.disk_free_gb, 1)} ГБ из ${nf(s.disk_total_gb, 1)}.`, src: "серверы", href, kind: "server"});
       }
@@ -613,9 +681,9 @@
     overview.projects.slice().sort((a, b) => order[a.state] - order[b.state]).forEach((p) => {
       const row = el("a", "project-row"); row.href = "#projects/" + p.id;
       const name = el("div", "project-name");
-      name.append(el("b", null, p.name), el("span", "muted", p.stage || ""));
-      const recovering = p.state === "ok" && /восстановлен|копи/i.test(p.stage || "");
-      const status = chip(recovering ? "warn" : p.state, recovering ? "Ограничен" : p.state === "ok" ? "В норме" : p.state === "bad" ? "Проблема" : "Проверить");
+      const nb = el("b", null, p.name), tag = modeTag(p); if (tag) nb.append(tag);
+      name.append(nb, el("span", "muted", p.stage || ""));
+      const status = stateChip(p.state);
       const figures = el("div", "project-figures");
       const a = (details[p.id] || {}).analytics || p.analytics;
       primaryKpis(a && a.kpis, 2, p.id).forEach((k) => {
@@ -626,7 +694,9 @@
         figures.append(figure);
       });
       if (!figures.children.length) figures.append(el("span", "muted", "Нет подтверждённой аналитики"));
-      row.append(name, status, figures, el("span", "project-site", siteLine(p)));
+      const site = el("span", "project-site", siteLine(p));
+      const fr = freshness(p.analytics); if (fr) { site.append(el("br")); site.append(fr); }
+      row.append(name, status, figures, site);
       list.append(row);
     });
     card.append(list); return card;
@@ -719,7 +789,9 @@
     left.append(el("div", "eyebrow", new Date().toLocaleDateString("ru-RU", {weekday: "long", day: "numeric", month: "long"}) + " · " + updated()), headline(items));
     const pills = el("div", "hero-pills");
     const pill = (label, val, of, st) => { const p = el("div", "hero-pill" + (st && st !== "ok" ? " " + st : "")); p.append(el("div", "stat-label", label)); const b = el("div", "mono hp-v", String(val)); if (of != null) b.append(el("small", null, "/" + of)); p.append(b); return p; };
-    pills.append(pill("проекты без замечаний", ps.filter((p) => p.state === "ok").length, ps.length, ps.some((p) => p.state === "bad") ? "bad" : ps.some((p) => p.state === "warn") ? "warn" : "ok"));
+    /* то же число, что у «Проекты» в меню: проекты с открытыми замечаниями */
+    const withIssues = ps.filter((p) => p.state !== "ok").length;
+    pills.append(pill("проекты с замечаниями", withIssues, ps.length, ps.some((p) => p.state === "bad") ? "bad" : withIssues ? "warn" : "ok"));
     const up = servers.filter((s) => s.status === "up").length;
     pills.append(pill("серверы", up, servers.length, up < servers.length ? "bad" : "ok"));
     const exitsK = Object.values(details).map((d) => ((d && d.analytics && d.analytics.kpis) || []).find((k) => k.id === "rf_exits")).find(Boolean);
@@ -764,8 +836,16 @@
     hl.append(el("div", "eyebrow", (grp ? grp.title : "Сервер") + (s && s.host ? " · " + s.host : "")), el("h2", "drawer-title", name));
     const meta = el("div", "drawer-meta");
     if (s) {
-      meta.append(chip(s.status === "up" ? "ok" : "bad", s.status === "up" ? "работает" : "нет связи по SSH"));
-      if (s.status === "up") meta.append(el("span", "mono muted", `аптайм ${nf(s.uptime_days, 1)} дн · пинг ${nf(s.ping_ms, 0)} мс`));
+      const viaPanel = /server_metrics/.test(s.metrics_source || "");
+      meta.append(chip(s.status === "up" ? "ok" : "bad", s.status === "up" ? "работает" : viaPanel ? "нет метрик из панели" : s.metrics_source === "tcp-probe" ? "не отвечает" : "нет связи по SSH"));
+      const facts = [];
+      if (s.uptime_days != null) facts.push(`аптайм ${nf(s.uptime_days, 1)} дн`);
+      const pg = s.ping_ms != null ? s.ping_ms : exitPing()[s.name];
+      if (pg != null) facts.push(`пинг ${nf(pg, 0)} мс` + (s.ping_ms == null ? " с РФ-входа" : ""));
+      facts.push("источник: " + (viaPanel ? "панель OneYearSolution" : s.metrics_source === "tcp-probe" ? "TCP-проверка" : "SSH"));
+      if (s.source_age_sec != null) facts.push(`метрики ${s.source_age_sec} с назад`);
+      if ((s.aliases || []).length) facts.push("в панели также: " + s.aliases.join(", "));
+      meta.append(el("span", "mono muted", facts.join(" · ")));
     }
     hl.append(meta);
     const close = el("button", "btn small", "Закрыть"); close.type = "button"; close.addEventListener("click", closeDrawer);
@@ -979,7 +1059,8 @@
     const right = el("div", "filters");
     const shownState = stateOfIssues(p.issues.filter((r) => !snoozed()[issueKey(p, r)]));
     const summaryMissing = shownState === "warn" && p.analytics?.error && p.check?.http >= 200 && p.check.http < 400;
-    right.append(chip(shownState, shownState === "ok" ? "работает" : shownState === "warn" ? summaryMissing ? "сводка неполная" : "есть замечания" : "проблема"));
+    right.append(chip(shownState, shownState === "warn" && summaryMissing ? "сводка неполная" : STATE_TEXT[shownState]));
+    const tagP = modeTag(p); if (tagP) right.prepend(tagP);
     if (p.link) { const a = el("a", "btn", "Открыть сайт ↗"); a.href = p.link; a.target = "_blank"; a.rel = "noopener"; right.append(a); }
     const an = p.analytics;
     v.append(viewHead([p.stage, siteLine(p), an && an.age_min != null ? "данные " + ago(an.age_min) : ""].filter(Boolean).join(" · "), p.name, right));
@@ -1030,11 +1111,13 @@
       head.append(title); owner.append(head);
       nelsonKpis.forEach((k) => grid.append(kpiStat(k))); owner.append(grid); v.append(owner);
     }
-    const extra = generalKpis.filter((k) => !primary.includes(k));
+    const missing = missingKpis(generalKpis);
+    const extra = generalKpis.filter((k) => !primary.includes(k) && !missing.includes(k));
     if (extra.length) {
       const more = disclosure("extra:" + id, "technical-section", "Дополнительные показатели · " + extra.length), grid = el("div", "stats");
       extra.forEach((k) => grid.append(kpiStat(k))); more.append(grid); v.append(more);
     }
+    if (missing.length) v.append(missingBlock(missing, "missing:" + id));
     const blocks = [];
     (an.matrices || []).forEach((mx) => blocks.push(matrixCard(mx, (serversTableOf(an) || {}).rows)));
     (an.charts || []).forEach((c) => {
@@ -1123,6 +1206,11 @@
       want.forEach((p, i) => { if (got[i]) next[p.id] = got[i]; else if (details[p.id]) next[p.id] = details[p.id]; });
       details = next;
       syncClosed();
+      const pings = exitPing();
+      if (JSON.stringify(window.infoExitPing || {}) !== JSON.stringify(pings)) {
+        window.infoExitPing = pings;
+        if (typeof renderTable === "function") renderTable();
+      }
       if (overview && overview.server_groups && JSON.stringify(window.infoServerGroups) !== JSON.stringify(overview.server_groups)) {
         window.infoServerGroups = overview.server_groups;
         if (typeof renderTable === "function") renderTable();

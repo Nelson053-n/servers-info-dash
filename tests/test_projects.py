@@ -135,7 +135,7 @@ def test_month_traffic_counts_only_files_from_the_first_of_the_month(main_module
 def test_stale_warning_formats_age_in_days_and_hours():
     doc = {"stale": True, "age_min": 4109}
     _, issues = projects._state_of(_row(analytics=doc))
-    assert any(i["text"] == "аналитика не обновлялась 2 дн 20 ч" for i in issues)
+    assert any(i["text"] == "сводка не обновлялась 2 дн 20 ч" for i in issues)
     assert projects._fmt_age(45) == "45 мин"
     assert projects._fmt_age(310) == "5 ч 10 мин"
     assert projects._fmt_age(1440) == "1 дн"
@@ -211,3 +211,46 @@ def test_card_flags_revenue_month_even_beyond_first_four_kpis():
     assert len(card["kpis"]) == 4
     assert card["has_revenue_month"] is True
     assert projects._card({"kpis": kpis[:3], "charts": []})["has_revenue_month"] is False
+
+
+def test_file_summary_error_is_not_staleness(tmp_path):
+    # пояснение о неполноте в поле error не делает свежую сводку «устаревшей»
+    now = projects._now().isoformat()
+    f = tmp_path / "vpn.json"
+    f.write_text(json.dumps({"generated_at": now, "status": "partial",
+                             "error": "Расходы/комиссии/возвраты не reconciled; прибыль неизвестна, не0", "kpis": []}))
+    doc = projects._read_analytics(projects.SummarySource(kind="file", path=str(f), max_age_min=30))
+    assert doc["stale"] is False and doc["stale_reason"] is None
+    projects._separate_coverage_limits(doc)
+    state, issues = projects._state_of(_row(analytics=doc))
+    assert state == "ok" and not issues
+
+
+def test_failed_collector_is_reported_as_source_outage(tmp_path):
+    now = projects._now()
+    f = tmp_path / "x.json"
+    f.write_text(json.dumps({"generated_at": now.isoformat(), "status": "stale", "error": "TimeoutError",
+                             "last_success": (now - projects.dt.timedelta(hours=3)).isoformat(), "kpis": []}))
+    doc = projects._read_analytics(projects.SummarySource(kind="file", path=str(f), max_age_min=30))
+    assert doc["stale_reason"] == "source"
+    _, issues = projects._state_of(_row(analytics=doc))
+    assert any(i["text"].startswith("источник данных недоступен — показаны прошлые значения (последний успех 3 ч") for i in issues)
+
+
+def test_kuma_method_notes_become_limitations_and_down_monitors_warn():
+    data = {"alerts": [{"severity": "warn", "text": "Экспорт обновляется отдельно от проверок. PAUSED и STALE не означают DOWN."},
+                       {"severity": "warn", "text": "Доступность = up/(up+down) по числу проверок Kuma."}],
+            "kpis": [{"id": "down", "value": 2, "status": "ok"}],
+            "tables": [{"id": "kuma_monitors", "rows": [{"monitor": "A", "state": "DOWN"}, {"monitor": "B", "state": "UP"},
+                                                         {"monitor": "C", "state": "DOWN"}, {"monitor": "D", "state": "PAUSED"}]}]}
+    projects._kuma_alerts(data)
+    assert [a["text"] for a in data["alerts"]] == ["Kuma: мониторы DOWN — A, C"]
+    assert len(data["limitations"]) == 2 and data["kpis"][0]["state"] == "warn"
+
+
+def test_single_tls_failure_is_warning_and_repeat_is_bad():
+    one = {"host": "x", "expires": None, "days_left": None, "error": "timeout", "fail_streak": 1}
+    state, issues = projects._state_of(_row(tls=one))
+    assert state == "warn" and "разовый сбой" in issues[0]["text"]
+    state, _ = projects._state_of(_row(tls={**one, "fail_streak": 2}))
+    assert state == "bad"

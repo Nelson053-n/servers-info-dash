@@ -11,15 +11,15 @@ const I = {
     bot_btn: "Бот уведомлений",
     save_btn: "Сохранить",
     col_server: "Сервер",
-    col_host: "Host",
+    col_host: "Адрес",
     col_status: "Статус",
-    col_ping: "Ping",
+    col_ping: "Пинг, мс",
     col_cpu: "CPU %",
-    col_ram: "RAM",
-    col_disk: "Диск",
+    col_ram: "RAM, занято",
+    col_disk: "Диск, занято",
     col_30d: "С 1-го числа",
     col_1d: "За день",
-    col_uptime: "Uptime",
+    col_uptime: "Аптайм",
     col_iface: "Интерфейс",
     col_error: "Ошибка",
     col_actions: "Действия",
@@ -124,10 +124,10 @@ const I = {
     col_server: "Server",
     col_host: "Host",
     col_status: "Status",
-    col_ping: "Ping",
+    col_ping: "Ping, ms",
     col_cpu: "CPU %",
-    col_ram: "RAM",
-    col_disk: "Disk",
+    col_ram: "RAM, used",
+    col_disk: "Disk, used",
     col_30d: "Month to date",
     col_1d: "1 day",
     col_uptime: "Uptime",
@@ -323,23 +323,19 @@ let showLocal = localStorage.getItem("showLocal") !== "false";
 const fmt = (v, d) =>
   v == null ? "\u2014" : Number(v).toFixed(d);
 
+/* Числа и единицы — одинаково во всех разделах: десятичная запятая для ru, ГБ/ТБ/МБ, кратность 1000
+   (так же считает обзор: трафик в CSV — десятичные гигабайты). */
+const locale = () => (lang === "ru" ? "ru-RU" : "en-US");
+const num = (v, d) => v == null ? "\u2014" : Number(v).toLocaleString(locale(), {minimumFractionDigits: d, maximumFractionDigits: d});
+const U = (ru, en) => (lang === "ru" ? ru : en);
 function traffic30dText(v) {
   if (v == null) return "\u2014";
   const gbValue = Number(v);
-  if (gbValue > 1024) {
-    const tb = (gbValue / 1024).toFixed(2);
-    const unitTb = lang === "ru" ? " Тб" : " TB";
-    return tb + unitTb;
-  }
-  if (gbValue < 1) {
-    const mb = Math.round(gbValue * 1024);
-    const unitMb = lang === "ru" ? " Мб" : " MB";
-    return mb + unitMb;
-  }
-  const gb = gbValue.toFixed(2);
-  const unitGb = lang === "ru" ? " Гб" : " GB";
-  return gb + unitGb;
+  if (gbValue >= 1000) return num(gbValue / 1000, 2) + " " + U("ТБ", "TB");
+  if (gbValue < 1) return num(gbValue * 1000, 0) + " " + U("МБ", "MB");
+  return num(gbValue, gbValue >= 100 ? 0 : 1) + " " + U("ГБ", "GB");
 }
+const sizePair = (used, total) => num(used, used >= 10 ? 0 : 1) + " / " + num(total, total >= 10 ? 0 : 1) + " " + U("ГБ", "GB");
 
 const esc = (v) => {
   if (v == null) return "";
@@ -500,7 +496,7 @@ function diskHtml(item) {
   return '<div class="disk-bar">' +
     '<div class="disk-track"><div class="disk-fill" style="width:' +
     pct.toFixed(0) + '%;background:' + c + '"></div></div>' +
-    '<span class="disk-text">' + f + '/' + tot + ' GB</span></div>';
+    '<span class="disk-text">' + sizePair(tot - f, tot) + '</span></div>';
 }
 
 /* =========  ram bar  ========= */
@@ -515,20 +511,29 @@ function ramHtml(item) {
   return '<div class="disk-bar">' +
     '<div class="disk-track"><div class="disk-fill" style="width:' +
     pct.toFixed(0) + '%;background:' + c + '"></div></div>' +
-    '<span class="disk-text">' + u + '/' + tot + ' GB</span></div>';
+    '<span class="disk-text">' + sizePair(u, tot) + '</span></div>';
 }
 
 /* =========  row  ========= */
 function rowTemplate(item) {
   const cls = item.status === "up" ? "up" : "down";
   const sn = esc(item.name);
-  const cpuVal = fmt(item.cpu_percent, 2);
+  /* нет связи и ни одного замера — «—», а не «0 МБ»: ноль трафика и отсутствие данных — разные вещи */
+  const noData = item.status !== "up" && !item.traffic_1d_gb && !item.traffic_month_gb;
+  const cpuVal = item.cpu_percent == null ? "\u2014" : num(item.cpu_percent, 0);
+  /* у нод из панели нет своего пинга — берём лучший пинг с РФ-входа из матрицы связности (views.js) */
+  const exitPing = (window.infoExitPing || {})[item._origName || item.name];
+  const pingCell = item.ping_ms != null ? num(item.ping_ms, item.ping_ms < 10 ? 1 : 0)
+    : exitPing != null ? '<span class="ping-via" title="' + esc(U("лучший пинг с РФ-входа (матрица связности)", "best ping from an RU entry (connectivity matrix)")) + '">' + num(exitPing, 0) + '</span>'
+    : "\u2014";
+  const statusText = item.status === "up" ? "UP" : (item.metrics_source && /server_metrics/.test(item.metrics_source) ? U("НЕТ МЕТРИК", "NO DATA") : "DOWN");
+  const aka = (item.aliases || []).length ? ' <span class="aka" title="' + esc(U("в панели та же машина: ", "same machine in panel: ") + item.aliases.join(", ")) + '">+' + item.aliases.length + '</span>' : "";
   const cpuStyle = item.cpu_percent != null
     ? ' style="color:' + cpuColor(item.cpu_percent) + ';font-weight:600"' : '';
   const isLocal = item.is_local;
   const localAttr = isLocal ? ' data-local="1"' : '';
   const nameCell = '<td><span class="editable-name" data-server="' +
-    sn + '"' + localAttr + '>' + sn + '</span></td>';
+    sn + '"' + localAttr + '>' + sn + '</span>' + aka + '</td>';
   const ifaceVal = esc(item.interface || '\u2014');
   const hasErr = item.error ? true : false;
   const errCls = hasErr ? ' err-active' : '';
@@ -545,16 +550,16 @@ function rowTemplate(item) {
   return '<tr>' +
     nameCell +
     '<td>' + esc(item.host) + '</td>' +
-    '<td><span class="status ' + cls + '">' + item.status.toUpperCase() + '</span></td>' +
-    '<td>' + (item.uptime_days != null ? item.uptime_days + 'd' : '\u2014') + '</td>' +
-    '<td>' + fmt(item.ping_ms, 1) + '</td>' +
-    '<td' + cpuStyle + '>' + cpuVal + '</td>' +
+    '<td><span class="status ' + cls + '">' + statusText + '</span></td>' +
+    '<td class="col-uptime num">' + (item.uptime_days != null ? num(item.uptime_days, 1) + U(" дн", "d") : '\u2014') + '</td>' +
+    '<td class="num">' + pingCell + '</td>' +
+    '<td class="num"' + cpuStyle + '>' + cpuVal + '</td>' +
     '<td>' + ramHtml(item) + '</td>' +
     '<td>' + diskHtml(item) + '</td>' +
-    '<td>' + fmt(item.rx_mbps, 2) + '</td>' +
-    '<td>' + fmt(item.tx_mbps, 2) + '</td>' +
-    '<td><span class="traffic-num">' + traffic30dText(item.traffic_1d_gb) + '</span></td>' +
-    '<td><span class="traffic-num">' + traffic30dText(item.traffic_month_gb) + '</span></td>' +
+    '<td class="num">' + (item.rx_mbps == null ? "\u2014" : num(item.rx_mbps, 1)) + '</td>' +
+    '<td class="num">' + (item.tx_mbps == null ? "\u2014" : num(item.tx_mbps, 1)) + '</td>' +
+    '<td><span class="traffic-num">' + (noData ? '\u2014' : traffic30dText(item.traffic_1d_gb)) + '</span></td>' +
+    '<td><span class="traffic-num">' + (noData ? '\u2014' : traffic30dText(item.traffic_month_gb)) + '</span></td>' +
     actionsCell + '</tr>';
 }
 
@@ -569,6 +574,9 @@ function renderTable() {
   }
   /* группы по ролям (server_groups в config/projects.yaml, приходят через views.js);
      внутри группы — текущая сортировка, сервер вне групп — в «Прочие» */
+  /* аптайм отдают только серверы с SSH-доступом; если таких меньше двух, колонка — пустая и скрывается */
+  const tableEl = rows.closest("table");
+  if (tableEl) tableEl.classList.toggle("no-uptime", data.filter((s) => s.uptime_days != null).length < 2);
   const groups = window.infoServerGroups || [];
   if (!groups.length) { rows.innerHTML = data.map(rowTemplate).join(""); return; }
   const idx = new Map();
@@ -584,9 +592,9 @@ function renderTable() {
 
 function showMeta(data) {
   if (!data) return;
-  const gen = new Date(data.generated_at).toLocaleString();
+  const gen = new Date(data.generated_at).toLocaleString(locale(), {day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit"});
   meta.textContent = t("updated") + ": " + gen +
-    " | " + t("interval") + ": " + data.refresh_interval_sec + "s";
+    " · " + t("interval") + ": " + data.refresh_interval_sec + U(" с", "s");
 }
 
 /* =========  inline rename  ========= */

@@ -18,7 +18,7 @@ GitHub Actions (`.github/workflows/deploy.yml`) только запускает 
 
 Образ на RU2 собирался из `deploy/ru2/Dockerfile` (контекст — корень репо: `requirements.txt`, `app/`, `recovery_app.py`),
 дальше правки накладывались слоями `COPY <файл>` поверх предыдущего тега (`recovery-info:<имя-правки>`), с каталогом отката
-`/opt/info-recovery/<имя-правки>/`. На 2026-11-06 работает `recovery-info:file-stale-fix-20261106`; файлы `app/` и
+`/opt/info-recovery/<имя-правки>/`. На 2026-11-07 работает `recovery-info:tech-20261107b` (каталог отката `/opt/info-recovery/tech-20261107/`, `rollback.sh`); файлы `app/` и
 `recovery_app.py` в этом коммите совпадают с содержимым контейнера.
 
 ```bash

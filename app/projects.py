@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import socket
 import ssl
@@ -261,13 +262,47 @@ def _read_kuma_analytics(src: SummarySource) -> dict[str, Any]:
             raise ValueError("timestamp rejected")
         data["age_min"] = round(age)
         data["stale"] = bool(data.get("stale") or data.get("error") or age > src.max_age_min)
+        data["stale_reason"] = ("age" if age > src.max_age_min else "source") if data["stale"] else None
         if data["stale"]:
             data["status"] = "stale"
             for metric in data["kpis"]:
                 metric["status"] = "stale" if metric.get("value") is not None else "unknown"
+        _kuma_alerts(data)
         return data
     except Exception:
         return {"error": "Kuma statistics unavailable or invalid"}
+
+
+def _kuma_alerts(data: dict[str, Any]) -> None:
+    """Экспорт Kuma кладёт в alerts пояснения к методике подсчёта — это не замечания.
+    Пояснения уходят в limitations (раздел «Ограничения данных»), а замечанием становится
+    то, что действительно требует внимания: мониторы в состоянии DOWN."""
+    notes, real = [], []
+    for a in data.get("alerts") or []:
+        text = str(a.get("text", ""))
+        if a.get("severity") != "bad" and re.match(r"(Экспорт обновляется отдельно|Доступность = up/)", text):
+            notes.append(text)
+        else:
+            real.append(a)
+    limits = [x for x in data.get("limitations") or [] if isinstance(x, dict)]
+    titles = ["Как читать состояния и задержки", "Как считается доступность"]
+    for i, text in enumerate(notes):
+        limits.append({"id": f"kuma_method_{i}", "title": titles[i] if i < len(titles) else "Методика Kuma",
+                       "impact": text, "action": "Ничего — это описание методики, а не ошибка.", "source_message": text})
+    rows = next((t.get("rows") or [] for t in data.get("tables") or [] if t.get("id") == "kuma_monitors"), [])
+    down = [str(r.get("monitor")) for r in rows
+            if str(r.get("state") or "").upper() == "DOWN" and r.get("monitor")]
+    if not down:
+        n = next((k.get("value") for k in data.get("kpis") or [] if k.get("id") == "down"), 0)
+        down = [f"{n} шт."] if isinstance(n, int) and n > 0 else []
+    if down:
+        real.append({"severity": "warn", "text": f"Kuma: мониторы DOWN — {', '.join(down[:6])}"
+                     + (f" и ещё {len(down) - 6}" if len(down) > 6 else "")})
+        for k in data.get("kpis") or []:
+            if k.get("id") == "down":
+                k["state"] = "warn"
+    data["alerts"] = real
+    data["limitations"] = limits
 
 
 def _read_analytics(src: SummarySource) -> dict[str, Any]:
@@ -298,9 +333,37 @@ def _read_analytics(src: SummarySource) -> dict[str, Any]:
         return {"error": "источник вернул не документ"}
     age = _doc_age_min(data, mtime)
     data["age_min"] = None if age is None else round(age)
-    data["stale"] = (bool(data.get("stale") or data.get("error") or age is None or age > src.max_age_min)
-                     if src.kind == "file" else age is not None and age > src.max_age_min)
+    # Устаревание — только про свежесть данных. Поле error у документа сборщика часто содержит
+    # пояснение о неполноте («прибыль не reconciled»), его разбирает _separate_coverage_limits;
+    # раньше оно делало свежий документ «устаревшим» и давало ложное «не обновлялась 4 мин».
+    # Сборщик, у которого упал источник, сам ставит status=stale и сохраняет прошлые значения.
+    if src.kind == "file":
+        if data.get("stale") is True or data.get("status") == "stale":
+            reason = "source"   # сборщик не достучался до источника и отдал прошлые значения
+        elif age is None:
+            reason = "no_timestamp"
+        elif age > src.max_age_min:
+            reason = "age"
+        else:
+            reason = None
+    else:
+        reason = "age" if age is not None and age > src.max_age_min else None
+    data["stale"] = reason is not None
+    data["stale_reason"] = reason
     return data
+
+
+def _last_success_age_min(doc: dict[str, Any]) -> float | None:
+    raw = doc.get("last_success")
+    if not raw:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=dt.timezone.utc)
+    return (_now() - t).total_seconds() / 60
 
 
 def _fmt_age(minutes: int) -> str:
@@ -388,7 +451,11 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     tls = project.get("tls")
     if tls:
         if tls["error"]:
-            bad.append("сертификат не проверяется")
+            # один неудачный TLS-handshake — обычно сетевой сбой; «срочно» — только если повторился
+            if tls.get("fail_streak", 2) >= 2:
+                bad.append("сертификат не проверяется")
+            else:
+                warn.append("сертификат не проверился (разовый сбой — повтор в следующем цикле)")
         elif tls["days_left"] < _TLS_BAD_DAYS:
             bad.append(f"сертификат истекает через {tls['days_left']} дн")
         elif tls["days_left"] < _TLS_WARN_DAYS:
@@ -397,12 +464,23 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     if doc.get("error"):
         warn.append(doc["error"])
     if doc.get("stale"):
-        warn.append(f"аналитика не обновлялась {_fmt_age(doc.get('age_min') or 0)}")
+        reason = doc.get("stale_reason")
+        if reason == "source":
+            ok_age = _last_success_age_min(doc)
+            warn.append("источник данных недоступен — показаны прошлые значения"
+                        + (f" (последний успех {_fmt_age(max(0, ok_age))} назад)" if ok_age is not None else ""))
+        elif reason == "no_timestamp":
+            warn.append("у сводки нет времени формирования — свежесть не проверить")
+        else:
+            warn.append(f"сводка не обновлялась {_fmt_age(doc.get('age_min') or 0)}")
     for a in doc.get("alerts") or []:
         text = str(a.get("text", ""))[:200]
         (bad if a.get("severity") == "bad" else warn).append(text)
     issues = [{"severity": "bad", "text": t} for t in bad] + [{"severity": "warn", "text": t} for t in warn]
     return ("bad" if bad else "warn" if warn else "ok"), issues
+
+
+_tls_fail_streak: dict[str, int] = {}
 
 
 async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
@@ -414,6 +492,10 @@ async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
             asyncio.to_thread(tls_expiry, p.tls_host) if p.tls_host else _none(),
             asyncio.to_thread(fetch_analytics, p.analytics) if p.analytics else _none(),
         )
+        if tls:
+            streak = _tls_fail_streak.get(p.tls_host, 0) + 1 if tls.get("error") else 0
+            _tls_fail_streak[p.tls_host] = streak
+            tls = {**tls, "fail_streak": streak}
         _drop_muted(doc, p.mute_alerts)
         _separate_coverage_limits(doc)
         row = {"id": p.id, "name": p.name, "stage": p.stage, "link": p.link, "note": p.note,
@@ -446,15 +528,22 @@ def _card(doc: dict[str, Any] | None) -> dict[str, Any] | None:
     if not doc:
         return None
     charts = doc.get("charts") or []
+    kpis = [k for k in doc.get("kpis") or [] if k.get("status") != "not_applicable"]
+    known = [k for k in kpis if k.get("value") is not None]
     return {
         "error": doc.get("error"),
         "stale": doc.get("stale"),
+        "stale_reason": doc.get("stale_reason"),
         "age_min": doc.get("age_min"),
         "generated_at": doc.get("generated_at"),
         "last_success": doc.get("last_success"),
         "status": doc.get("status"),
         "has_details": bool(doc.get("kpis") or doc.get("tables") or doc.get("charts")),
-        "kpis": (doc.get("kpis") or [])[:4],
+        # в карточку — только показатели со значением; пустые считаются отдельно,
+        # иначе сетка карточки заполняется плитками «нет данных»
+        "kpis": known[:4],
+        "kpi_total": len(kpis),
+        "kpi_missing": len(kpis) - len(known),
         "has_revenue_month": any(k.get("id") == "revenue_month" for k in doc.get("kpis") or []),
         "spark": charts[0] if charts else None,
         # для сводки «выручка всех проектов» на обзоре — по договорённому id

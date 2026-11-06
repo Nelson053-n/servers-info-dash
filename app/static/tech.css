@@ -129,3 +129,55 @@ table{border-radius:4px}
 .issue-closed{margin:6px 0 12px;color:var(--muted)}
 .issue-closed>summary{cursor:pointer;font-size:13px;padding:4px 0}
 .issue.closed{opacity:.75}
+
+/* ===== 2026-11-07: «приборная панель» — единые числа, свежесть у каждой цифры, статус как индикатор ===== */
+/* все числа — моноширинные табличные цифры: столбцы не «пляшут» при обновлении */
+.mono,.stat-value,.pk-value,.figure-value,.hp-v,#srvTable td,.ptable td,.tr-v,.tr-now,.fc-val,.cert-list .d{font-variant-numeric:tabular-nums slashed-zero}
+#srvTable td.num,#srvTable th[data-key="ping_ms"],#srvTable th[data-key="cpu_percent"],#srvTable th[data-key="rx_mbps"],#srvTable th[data-key="tx_mbps"]{text-align:right}
+#srvTable td.num{font-family:var(--mono)}
+.no-uptime .col-uptime{display:none}
+.ping-via{border-bottom:1px dotted var(--muted);cursor:help}
+.aka{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--line);padding:0 4px;margin-left:4px;cursor:help}
+
+/* статус — светодиод + моноширинная метка капсом */
+.chip{text-transform:uppercase;letter-spacing:.06em;font-size:10.5px;gap:6px}
+.chip::before{content:"";width:6px;height:6px;border-radius:1px;background:currentColor;box-shadow:0 0 6px currentColor;flex:none}
+.mode-tag{display:inline-block;margin-left:8px;padding:1px 6px;border:1px dashed var(--line);font-family:var(--mono);font-size:10px;
+  font-weight:400;letter-spacing:.04em;color:var(--text2);vertical-align:2px;text-transform:uppercase}
+.filters .mode-tag{align-self:center}
+
+/* подписи показателей — как маркировка на панели */
+.stat-label,.pk-label,.figure-label,.hero-pill .stat-label{text-transform:uppercase;letter-spacing:.05em;font-size:10px}
+.metric-meta{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-top:2px}
+.metric-meta .metric-status{display:inline}
+.metric-time{font-family:var(--mono);font-size:10px;color:var(--muted)}
+.metric-time::before{content:"⟳ ";opacity:.6}
+
+/* свежесть сводки */
+.fresh{font-family:var(--mono);font-size:10.5px;color:var(--muted);white-space:nowrap}
+.fresh::before{content:"";display:inline-block;width:5px;height:5px;margin-right:5px;vertical-align:1px;background:var(--ok);border-radius:50%}
+.fresh.stale{color:var(--warn-fg)}.fresh.stale::before{background:var(--warn)}
+
+/* карточки проектов: полоса состояния сверху, низ — строка телеметрии */
+a.pcard{border-top:2px solid color-mix(in srgb,var(--ok) 55%,var(--line))}
+a.pcard.warn{border-top-color:var(--warn)}a.pcard.bad{border-top-color:var(--bad)}
+.pcard-foot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:11px}
+.pcard-missing{font-family:var(--mono);font-size:10.5px;color:var(--muted);border-left:2px solid var(--line);padding-left:8px}
+.project-row{border-left:2px solid transparent}
+.project-row:has(.chip.warn){border-left-color:var(--warn)}.project-row:has(.chip.bad){border-left-color:var(--bad)}
+
+/* показатели без источника — одной строкой со списком причин */
+.kpi-missing>summary{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.missing-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px}
+.missing-list li{display:grid;grid-template-columns:minmax(160px,260px) 1fr;gap:12px;padding:6px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+.missing-list b{font-weight:500}
+@media (max-width:600px){.missing-list li{grid-template-columns:1fr;gap:2px}}
+
+/* фон рабочей области — едва заметная сетка, как на миллиметровке */
+.content{background-image:linear-gradient(color-mix(in srgb,var(--text) 3%,transparent) 1px,transparent 1px),
+  linear-gradient(90deg,color-mix(in srgb,var(--text) 3%,transparent) 1px,transparent 1px);background-size:24px 24px;background-position:-1px -1px}
+.hero-pill{border-top:2px solid var(--line)}.hero-pill.warn{border-top-color:var(--warn)}.hero-pill.bad{border-top-color:var(--bad)}
+/* статус в списке проектов: метка капсом шире прежних 80 px */
+.project-row{grid-template-columns:minmax(140px,1fr) 118px minmax(260px,2fr) 150px}
+@media(max-width:1000px){.project-row{grid-template-columns:minmax(130px,1fr) 118px minmax(220px,2fr)}}
+@media(max-width:600px){.project-row{grid-template-columns:minmax(0,1fr) auto}}

@@ -62,7 +62,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   d.querySelector("#projectsView .issue .ghost").click();
   await wait(300);
   checks.push(["после закрытия замечания на странице нет", issue() === 0]);
-  checks.push(["статус проекта «работает»", d.querySelector("#projectsView .chip").textContent.includes("работает")]);
+  checks.push(["статус проекта «норма»", d.querySelector("#projectsView .chip:not(.mode-tag)").textContent.includes("норма")]);
   checks.push(["в «Закрыто на сутки» оно есть", d.querySelector("#projectsView .issue-closed").textContent.includes("ТСПУ блокирует")]);
   checks.push(["точка проекта в меню зелёная", d.querySelector("#railProjects .sdot").classList.contains("ok")]);
   d.querySelector("#projectsView .issue-closed .ghost").click();

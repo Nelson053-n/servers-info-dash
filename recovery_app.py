@@ -96,14 +96,20 @@ async def collect_with_panel():
             source_error = type(exc).__name__
     if bridge_failed:
         source_error = source_error or 'panel bridge paused after connection failure'
+    # В панели одна машина может числиться несколькими нодами (разные протоколы на одном IP).
+    # Для парка серверов это одна машина: иначе её сбой считается дважды в «на связи» и в замечаниях.
+    by_host = {}
     for row in last_rows:
         if row['name'] in hidden_nodes:
+            continue
+        if row.get('host') and row['host'] in by_host:
+            by_host[row['host']].setdefault('aliases', []).append(row['name'])
             continue
         fresh = row['age_sec'] is not None and 0 <= int(row['age_sec']) <= 180
         available = not source_error and fresh and row['cpu_percent'] is not None
         disk_total = number(row['disk_total_gb']) if available else None
         disk_used = number(row['disk_used_gb']) if available else None
-        data['servers'].append({
+        entry = {
             'name': row['name'], 'host': row['host'], 'country': row['country_code'],
             'status': 'up' if available else 'down',
             'error': None if available else (source_error or f"Панель: {row['panel_status']}; нет свежих метрик"),
@@ -118,13 +124,19 @@ async def collect_with_panel():
             'interface': 'panel-db', 'metrics_source': 'amn-lv3/server_metrics',
             'source_collected_at': row['collected_at'], 'source_age_sec': row['age_sec'],
             'panel_status': row['panel_status'],
-        })
+        }
+        data['servers'].append(entry)
+        if row.get('host'):
+            by_host[row['host']] = entry
     data['panel_bridge_error'] = source_error
     ports = dict(await asyncio.gather(*(rustdesk_port(port) for port in (22, 21115, 21116, 21117))))
+    open_ports = [str(p) for p, ok in ports.items() if ok]
     data['servers'].append({
         'name': 'RustDesk (217.26.27.80)', 'host': '217.26.27.80', 'country': None,
         'status': 'up' if ports[21117] else 'down',
-        'error': 'Только TCP-наблюдение; SSH-доступ для метрик не восстановлен',
+        'error': None if ports[21117] else (
+            'Relay-порт 21117 закрыт; открыты: ' + (', '.join(open_ports) if open_ports else 'ни один из 22/21115/21116')
+            + '. Метрик нет: только TCP-наблюдение'),
         'tcp_ports': ports, 'metrics_source': 'tcp-probe',
         'cpu_percent': None, 'ram_used_gb': None, 'ram_total_gb': None,
         'disk_free_gb': None, 'disk_total_gb': None, 'rx_mbps': None, 'tx_mbps': None,
