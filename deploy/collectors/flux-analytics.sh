@@ -60,7 +60,7 @@ def load_rewards(since_ts, max_pages=60):
         fetched += 1
         new = 0
         for tx in rows:
-            if "coinbase" not in (tx.get("vin") or [{}])[0]:
+            if not tx.get("confirmations") or "coinbase" not in (tx.get("vin") or [{}])[0]:
                 continue
             val = sum(float(o["value"]) for o in tx.get("vout") or [] if os.environ["WALLET"] in ((o.get("scriptPubKey") or {}).get("addresses") or []))
             if val and tx["txid"] not in txs:
@@ -92,6 +92,76 @@ def cbr_usd_rub(d1, d2):
             return {}
     return out
 
+def pa_accrual(native, timestamp):
+    """Оценка gross PA, не claim. Точный час закрытия Ergo 21.09.2026 не опубликован.
+
+    https://docs.runonflux.com/fluxnodes/claim-parallel-assets/
+    На спорную календарную дату оставляем диапазон 9–10 PA, по 10% каждый.
+    """
+    day = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).date()
+    if day < dt.date(2026, 9, 21):
+        return native, native
+    if day == dt.date(2026, 9, 21):
+        return native * 0.9, native
+    return native * 0.9, native * 0.9
+
+
+def pa_totals(wallet):
+    chains = (wallet or {}).get("pa_chains") or []
+    if not chains or (wallet.get("totals") or {}).get("is_estimate", True):
+        return None
+    return {key: sum(c[key] for c in chains)
+            if all(isinstance(c.get(key), (int, float)) for c in chains) else None
+            for key in ("claimable", "claimed", "received", "fees")}
+
+
+def monthly_income(rewards, price_points, rub_rates):
+    # Месяц — Владивосток, котировка — UTC-дата выплаты. Native берём из транзакций,
+    # а не из сегодняшнего прогноза. Отсутствие курса не обнуляет полученные монеты.
+    prices = {dt.datetime.fromtimestamp(p["t"], dt.timezone.utc).date(): p["usd"]
+              for p in price_points if isinstance(p.get("usd"), (int, float))}
+    out = {}
+    for timestamp, native in rewards.values():
+        date = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).date()
+        month = dt.datetime.fromtimestamp(timestamp, VL).strftime("%Y-%m")
+        row = out.setdefault(month, {"native": 0, "pa_min": 0, "pa_max": 0,
+                                    "rub_min": 0, "rub_max": 0, "usd_min": 0, "usd_max": 0,
+                                    "rewards": 0, "priced": 0, "usd_priced": 0})
+        low, high = pa_accrual(native, timestamp)
+        row["native"] += native
+        row["pa_min"] += low
+        row["pa_max"] += high
+        row["rewards"] += 1
+        usd = prices.get(date)
+        rub = next((rub_rates[d] for d in sorted(rub_rates, reverse=True) if d <= date), None)
+        if usd is None:
+            continue
+        row["usd_priced"] += 1
+        row["usd_min"] += (native + low) * usd
+        row["usd_max"] += (native + high) * usd
+        if rub is None:
+            continue
+        row["priced"] += 1
+        row["rub_min"] += (native + low) * usd * rub
+        row["rub_max"] += (native + high) * usd * rub
+    for row in out.values():
+        row["total_min"] = row["native"] + row["pa_min"]
+        row["total_max"] = row["native"] + row["pa_max"]
+        if row["priced"] != row["rewards"]:
+            row["rub_min"] = row["rub_max"] = None
+        if row["usd_priced"] != row["rewards"]:
+            row["usd_min"] = row["usd_max"] = None
+    return out
+
+
+def amount_range(low, high, digits=2):
+    if low is None or high is None:
+        return None
+    if abs(high - low) < 1e-8:
+        return round(low, digits)
+    return f"{low:.{digits}f}–{high:.{digits}f}"
+
+
 def j(name):
     try:
         return json.loads(os.environ.get(name) or "")
@@ -111,13 +181,21 @@ if wallet:
     bal = wallet.get("balance") or {}
     kpis.append({"id": "balance_usd", "label": "Кошелёк, $", "value": round(bal.get("usd", 0)), "unit": "$"})
     kpis.append({"id": "balance_flux", "label": "Кошелёк, FLUX", "value": round(bal.get("flux", 0)), "unit": "FLUX"})
-    claim = sum(c.get("claimable", 0) for c in wallet.get("pa_chains") or [])
-    kpis.append({"id": "pa_claimable", "label": "PA к получению", "value": round(claim, 1), "unit": "FLUX",
-                 "hint": "Parallel Assets: сумма claimable по сетям"})
-    tables.append({"id": "pa", "title": "Parallel Assets по сетям",
-                   "columns": [{"key": "chain", "label": "Сеть"}, {"key": "claimable", "label": "К получению", "num": True},
-                               {"key": "claimed", "label": "Получено", "num": True}, {"key": "fees", "label": "Комиссии", "num": True}],
-                   "rows": [{k: (round(c[k], 2) if isinstance(c.get(k), float) else c.get(k)) for k in ("chain", "claimable", "claimed", "fees")}
+    pa = pa_totals(wallet)
+    if pa is not None:
+        for key, label in (("claimable", "PA доступно к claim"), ("claimed", "PA claimed до комиссий"),
+                           ("received", "PA получено после комиссий"), ("fees", "PA комиссии claim")):
+            kpis.append({"id": "pa_" + key, "label": label,
+                         "value": round(pa[key], 2) if pa[key] is not None else None, "unit": "FLUX-экв.",
+                         "hint": "Накопительно по Fusion, включая исторические сети; не выплаты за месяц"})
+    tables.append({"id": "pa", "title": "PA: накопительные итоги по сетям",
+                   "columns": [{"key": "chain", "label": "Сеть"}, {"key": "claimable", "label": "Доступно к claim", "num": True},
+                               {"key": "claimed", "label": "Claimed до комиссий", "num": True},
+                               {"key": "received", "label": "Получено после комиссий", "num": True},
+                               {"key": "fees", "label": "Комиссии", "num": True}],
+                   "rows": [{**{k: (round(c[k], 2) if isinstance(c.get(k), (int, float)) else c.get(k))
+                                  for k in ("chain", "claimable", "claimed", "received", "fees")},
+                             "chain": c["chain"] + (" (закрыт, остаток)" if c["chain"] == "erg" else "")}
                             for c in wallet.get("pa_chains") or []]})
     fleet = (wnodes or {}).get("nodes")
     total = wallet.get("total_nodes")
@@ -142,13 +220,13 @@ if wallet:
         kpis.append({"id": "fleet_uptime", "label": "Аптайм парка", "value": round(wallet["fleet_uptime_pct"], 1), "unit": "%"})
     ern = wallet.get("earnings") or {}
     if ern:
-        kpis.append({"id": "earn_day", "label": "Доход в сутки", "value": round((ern.get("daily") or {}).get("flux", 0), 1), "unit": "FLUX",
-                     "hint": f"≈ {round((ern.get('daily') or {}).get('usd', 0), 2)} $ в сутки, ≈ {round((ern.get('monthly') or {}).get('usd', 0))} $ в месяц"})
+        kpis.append({"id": "earn_day", "label": "Прогноз начислений в сутки", "value": round((ern.get("daily") or {}).get("flux", 0), 1), "unit": "FLUX-экв.",
+                     "hint": f"Native + PA до комиссий; прогноз на 30 дней. ≈ {round((ern.get('daily') or {}).get('usd', 0), 2)} $ в сутки, ≈ {round((ern.get('monthly') or {}).get('usd', 0))} $ в месяц"})
         kpis.append({"id": "apy", "label": "APY", "value": round(ern.get("apy_percent", 0), 1), "unit": "%"})
     tot = wallet.get("totals") or {}
-    if tot.get("mined"):
-        kpis.append({"id": "mined", "label": "Намайнено всего", "value": round(tot["mined"].get("flux", 0)), "unit": "FLUX",
-                     "hint": f"≈ {round(tot['mined'].get('usd', 0))} $; получено {round((tot.get('claimed') or {}).get('flux', 0))} FLUX"})
+    if tot.get("mined") and not tot.get("is_estimate", True):
+        kpis.append({"id": "mined", "label": "PA начислено за всё время", "value": round(tot["mined"].get("flux", 0)), "unit": "FLUX",
+                     "hint": "Накопительный gross PA из Fusion, отдельно от native и месячной оценки; это не сумма полученного"})
     if fleet:
         rows = []
         for n in sorted(fleet, key=lambda n: n.get("rank") or 0):
@@ -191,68 +269,68 @@ if pts:
                        "note": "текущий баланс FLUX × курс каждого дня",
                        "series": [{"name": "$", "points": [[d, round(f * by_day[d])] for d in days]}]})
 
-# ── Доход нод по месяцам: FLUX × курс FLUX на день выплаты × курс ЦБ на этот день ──
-by_usd = {}
-for p_ in pts:
-    by_usd[dt.datetime.fromtimestamp(p_["t"], dt.timezone.utc).date()] = p_["usd"]
-if by_usd:
-    first_day = min(by_usd)
+# ── Начисленный доход: полученный native + расчётные PA, до claim/комиссий ──
+if pts:
+    first_day = min(dt.datetime.fromtimestamp(p["t"], dt.timezone.utc).date() for p in pts)
     rewards, backfill = load_rewards(dt.datetime.combine(first_day, dt.time(), dt.timezone.utc).timestamp())
     rate = cbr_usd_rub(first_day, dt.datetime.now(dt.timezone.utc).date())
-    if rewards and rate:
-        def rub_at(day):
-            usd = by_usd.get(day) or by_usd[max(d for d in by_usd if d <= day)] if day >= first_day else None
-            r = rate.get(day) or next((rate[d] for d in sorted(rate, reverse=True) if d <= day), None)
-            return None if usd is None or r is None else usd * r
-        # Parallel Assets: каждая из PA-сетей даёт +10 % к каждой награде (fusion: maxClaimablePerChain = 10 % от всех наград
-        # на адрес); начисляется независимо от того, выведено или нет. Число сетей берём из сводки кошелька.
-        pa_k = 0.1 * len((wallet or {}).get("pa_chains") or [])
-        flux_m, pa_m, rub_m = {}, {}, {}
-        for ts, val in rewards.values():
-            day = dt.datetime.fromtimestamp(ts, dt.timezone.utc).date()
-            rr = rub_at(day)
-            if rr is None:
-                continue
-            m = dt.datetime.fromtimestamp(ts, VL).strftime("%Y-%m")
-            flux_m[m] = flux_m.get(m, 0) + val
-            pa_m[m] = pa_m.get(m, 0) + val * pa_k
-            rub_m[m] = rub_m.get(m, 0) + val * (1 + pa_k) * rr
-        now_l = dt.datetime.now(VL)
-        months = []
-        y, mo = now_l.year, now_l.month
-        for _ in range(12):
-            months.append("%04d-%02d" % (y, mo))
-            mo -= 1
-            if mo == 0:
-                y, mo = y - 1, 12
-        months.reverse()
-        # месяц, в котором начинается история курса, неполный — его не показываем
-        full_from = (dt.datetime.combine(first_day, dt.time(), dt.timezone.utc).astimezone(VL).date().replace(day=1) + dt.timedelta(days=32)).strftime("%Y-%m")
-        months = [m for m in months if m >= full_from]
-        cur, prev = now_l.strftime("%Y-%m"), (now_l.replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
-        kpis.append({"id": "revenue_month", "label": f"Доход нод с 1 {MONTHS_GEN[now_l.month - 1]}", "value": round(rub_m.get(cur, 0)), "unit": "₽",
-                     "hint": f"{round(flux_m.get(cur, 0))} FLUX + {round(pa_m.get(cur, 0))} PA по курсу FLUX и ЦБ на день получения; месяц по Владивостоку"})
-        pm = int(prev[5:]) - 1
-        if prev in flux_m or prev in months:
-            kpis.append({"id": "revenue_prev_month", "label": f"Доход нод за {MONTHS_ACC[pm]}", "value": round(rub_m.get(prev, 0)), "unit": "₽"})
-        charts.insert(0, {"id": "revenue_monthly", "title": "Доход нод по месяцам", "kind": "bar", "unit": "₽",
-                          "note": "награды нод + Parallel Assets (начислено, без учёта вывода) в рублях по курсу на день получения; текущий месяц неполный",
-                          "series": [{"name": "₽", "points": [[m, round(rub_m.get(m, 0))] for m in months]}]})
-        charts.insert(1, {"id": "income_flux_monthly", "title": "Доход нод по месяцам, FLUX", "kind": "bar", "unit": "FLUX",
-                          "note": "начислено: награды нод и Parallel Assets, без учёта вывода",
-                          "series": [{"name": "награды", "points": [[m, round(flux_m.get(m, 0), 1)] for m in months]},
-                                     {"name": "PA", "points": [[m, round(pa_m.get(m, 0), 1)] for m in months]}]})
-        tables.append({"id": "income_months", "title": "Доход нод по месяцам",
-                       "columns": [{"key": "month", "label": "Месяц"}, {"key": "flux", "label": "Награды, FLUX", "num": True},
-                                   {"key": "pa", "label": "PA, FLUX", "num": True}, {"key": "total", "label": "Всего, FLUX", "num": True},
-                                   {"key": "rub", "label": "₽", "num": True}, {"key": "avg", "label": "Средний курс, ₽/FLUX", "num": True}],
-                       "rows": [{"month": m, "flux": round(flux_m.get(m, 0), 1), "pa": round(pa_m.get(m, 0), 1),
-                                 "total": round(flux_m.get(m, 0) + pa_m.get(m, 0), 1), "rub": round(rub_m.get(m, 0)),
-                                 "avg": round(rub_m[m] / (flux_m[m] + pa_m[m]), 2) if flux_m.get(m) else None} for m in reversed(months)]})
-        if backfill:
-            alerts.append({"severity": "warn", "text": "История наград догружается из эксплорера, цифры по старым месяцам неполные"})
-    else:
-        alerts.append({"severity": "warn", "text": "Доход по месяцам не посчитан: нет данных эксплорера или курса ЦБ"})
+    income = monthly_income(rewards, pts, rate)
+    now_l = dt.datetime.now(VL)
+    months, y, mo = [], now_l.year, now_l.month
+    for _ in range(12):
+        months.append("%04d-%02d" % (y, mo))
+        mo -= 1
+        if not mo:
+            y, mo = y - 1, 12
+    months.reverse()
+    cur, prev = months[-1], months[-2]
+    for month, key, label in ((cur, "revenue_month", f"Начислено с 1 {MONTHS_GEN[now_l.month - 1]}"),
+                              (prev, "revenue_prev_month", f"Начислено за {MONTHS_ACC[int(prev[5:]) - 1]}")):
+        row = income.get(month)
+        if row and row["rub_min"] is not None:
+            kpis.append({"id": key, "label": label, "value": round(row["rub_min"]), "unit": "₽",
+                         "hint": f"Получено {row['native']:.2f} native FLUX + PA (оценка) "
+                                 f"{amount_range(row['pa_min'], row['pa_max'])}; до комиссий claim. "
+                                 f"Оценка ₽: {amount_range(row['rub_min'], row['rub_max'], 0)}; "
+                                 "при диапазоне показана нижняя граница. Курс FLUX/ЦБ по дате выплаты"})
+    current = income.get(cur)
+    if current:
+        for key, label, val in (("native_month", "Native получено за месяц", current["native"]),
+                                ("pa_accrued_month", "PA за месяц (расчёт gross)", amount_range(current["pa_min"], current["pa_max"])),
+                                ("accrued_month", "Всего начислено за месяц", amount_range(current["total_min"], current["total_max"]))):
+            kpis.append({"id": key, "label": label, "value": round(val, 2) if isinstance(val, (int, float)) else val,
+                         "unit": "FLUX" if key == "native_month" else "FLUX-экв.",
+                         "hint": "Native — coinbase на наш адрес; PA — начисления по правилам сети, не месячные claim/received"})
+    note = ("Полученный native + PA (расчёт gross), до комиссий. PA: 10% на активную сеть; "
+            "после закрытия Ergo — 9 сетей. За 21.09.2026 точный час неизвестен: "
+            "в таблице диапазон, график показывает нижнюю границу. Месяцы — Владивосток; "
+            "USD — дневной CoinGecko по UTC-дате, ₽ — курс ЦБ; это оценки, не продажи. "
+            "Датированной истории claim PA нет.")
+    priced_months = [m for m in months if m in income and income[m]["rub_min"] is not None]
+    charts.insert(0, {"id": "revenue_monthly", "title": "Начислено native + PA по месяцам", "kind": "bar", "unit": "₽",
+                      "note": note, "series": [{"name": "Начислено (нижняя оценка)",
+                      "points": [[m, round(income[m]["rub_min"])] for m in priced_months]}]})
+    charts.insert(1, {"id": "income_flux_monthly", "title": "Native и начисленные PA", "kind": "bar", "unit": "FLUX-экв.",
+                      "note": note, "series": [{"name": "Получено native", "points": [[m, round(income[m]["native"], 2)] for m in months if m in income]},
+                                               {"name": "PA (оценка, нижняя граница)", "points": [[m, round(income[m]["pa_min"], 2)] for m in months if m in income]}]})
+    tables.append({"id": "income_months", "title": "Начислено: native + PA (оценка, до комиссий)",
+                   "columns": [{"key": "month", "label": "Месяц"}, {"key": "native", "label": "Получено native FLUX", "num": True},
+                               {"key": "rewards", "label": "Выплат", "num": True},
+                               {"key": "pa", "label": "PA расчёт gross, FLUX-экв."},
+                               {"key": "total", "label": "Всего начислено, FLUX-экв."},
+                               {"key": "usd", "label": "$ по историческим курсам"}, {"key": "rub", "label": "₽ по историческим курсам"}],
+                   "rows": [{"month": m, "native": round(income[m]["native"], 2), "rewards": income[m]["rewards"],
+                             "pa": amount_range(income[m]["pa_min"], income[m]["pa_max"]),
+                             "total": amount_range(income[m]["total_min"], income[m]["total_max"]),
+                             "usd": amount_range(income[m]["usd_min"], income[m]["usd_max"]),
+                             "rub": amount_range(income[m]["rub_min"], income[m]["rub_max"], 0)}
+                            for m in reversed(months) if m in income]})
+    if backfill:
+        alerts.append({"severity": "warn", "text": "История native догружается: старые месяцы могут быть неполными"})
+    if any(r["rub_min"] is None for m, r in income.items() if m in months):
+        alerts.append({"severity": "warn", "text": "Для части выплат нет исторического курса: монеты учтены, денежная оценка месяца не показана"})
+else:
+    alerts.append({"severity": "warn", "text": "Исторические курсы FLUX недоступны: месячная оценка не рассчитана"})
 
 svc_rows = []
 for item in (os.environ.get("UNITS", "") + " " + os.environ.get("CONTAINERS", "")).split():

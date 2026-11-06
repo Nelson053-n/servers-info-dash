@@ -76,7 +76,8 @@ if items:
         {"id": "value", "label": "Портфель с деньгами", "value": round(value + cash), "unit": "₽"},
         {"id": "day", "label": "Изменение за день", "value": round(day), "unit": "₽", "state": "ok" if day >= 0 else "warn"},
         {"id": "profit", "label": "Курсовая прибыль", "value": round(profit), "unit": "₽"},
-        {"id": "coupons", "label": "Купонов получено", "value": round(extra.get("realized_coupons") or 0), "unit": "₽"},
+        {"id": "coupons", "label": "Купонов по текущим бумагам", "value": round(extra.get("realized_coupons") or 0), "unit": "₽",
+         "hint": "только по бумагам, которые сейчас в портфеле; проданные и погашенные не входят — полные выплаты см. «Купоны по месяцам»"},
         {"id": "cash", "label": "Свободные деньги", "value": round(cash), "unit": "₽"},
         {"id": "coupon_rate", "label": "Средний купон", "value": round(w_cr / value, 2) if value else None, "unit": "%",
          "hint": "купонная ставка, взвешенная по стоимости позиций"},
@@ -116,12 +117,14 @@ charts.append({"id": "users_30d", "title": "Новые пользователи 
                "series": [{"name": "пользователи", "points": [[d, new_users.get(d, 0)] for d in days30]}]})
 users_total = q("SELECT COUNT(*) FROM users")[0][0]
 pro_now = q("SELECT COUNT(*) FROM users WHERE is_pro = 1 AND (pro_until IS NULL OR pro_until >= ?)", today.isoformat())[0][0]
-paid30 = q("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM pro_payments WHERE status = 'succeeded' AND created_at >= ?", days30[0])[0]
+paid30 = q("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM pro_payments WHERE status = 'succeeded' AND plan <> 'donation' AND created_at >= ?", days30[0])[0]
+donat30 = q("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM pro_payments WHERE status = 'succeeded' AND plan = 'donation' AND created_at >= ?", days30[0])[0]
 kpis += [
     {"id": "users", "label": "Пользователей сервиса", "value": users_total},
     {"id": "users_30d", "label": "Новых за 30 дней", "value": sum(new_users.values())},
-    {"id": "pro", "label": "Pro-подписок", "value": pro_now},
-    {"id": "pro_paid_30d", "label": "Оплат Pro за 30 дней", "value": round(paid30[1]), "unit": "₽"},
+    {"id": "pro", "label": "Pro-доступ", "value": pro_now, "hint": "включая выданный бесплатно: у всех пользователей Pro выдан на год или бессрочно"},
+    {"id": "pro_paid_30d", "label": "Оплат Pro за 30 дней", "value": round(paid30[1]), "unit": "₽", "hint": f"платежей: {paid30[0]}; донаты отдельно"},
+    {"id": "donations_30d", "label": "Донатов за 30 дней", "value": round(donat30[1]), "unit": "₽", "hint": f"платежей: {donat30[0]}"},
 ]
 
 top = sorted(items, key=lambda i: -(i.get("current_value") or 0))[:50]
