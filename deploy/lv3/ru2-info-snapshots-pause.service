@@ -1,0 +1,5 @@
+[Unit]
+Description=Pause Info snapshot synchronization after one failed run
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl stop ru2-info-snapshots.timer

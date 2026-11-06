@@ -1,0 +1,62 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Real-time server monitoring dashboard. Collects metrics from Linux servers over SSH (no remote agents), displays them in a single-page web UI, and sends Telegram alerts on threshold violations.
+
+## Commands
+
+```bash
+# Run the app
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Run tests
+pip install pytest httpx
+pytest -q
+
+# Frontend load check (catches runtime errors that break the whole page)
+npm i --no-save jsdom@24 && node tests/frontend_smoke.js
+
+# Syntax check
+python -m py_compile app/main.py
+
+# Validate example config
+python -c "import yaml; from pathlib import Path; d=yaml.safe_load(Path('config/servers.example.yaml').read_text()); assert all(k in d for k in ['refresh_interval_sec','ssh','servers'])"
+```
+
+## Architecture
+
+**Backend** — `app/main.py` (FastAPI, monitoring core) plus `app/projects.py` (Projects tab: project summaries, site checks, analytics documents):
+
+- **Pydantic models** (top): `AppConfig`, `ServerConfig`, `BotConfig`, `SSHSettings`, request/response models
+- **`MetricsCollector` class**: core engine — collects metrics from all servers in parallel via `asyncio.gather`. Remote data fetched with a single SSH command per server per cycle (reads `/proc/stat`, `/proc/meminfo`, `/proc/net/dev`, `/proc/uptime`, `df`). CPU/network rates are delta-based (needs two samples). Supports normal (ephemeral connections) and persistent (pooled with keepalive) SSH modes via `asyncssh`
+- **Auth system** (`_AuthState`, `_RateLimiter`): PBKDF2-SHA256 passwords, IP-bound sessions stored in `config/auth.yaml` (pruned: 30 days, max 10 per IP), per-IP and global login limiters, CIDR whitelist, CSRF origin checking. Optional second factor (`two_factor` in auth.yaml): `/api/auth/login` returns `2fa_required` and sends a 6-digit code to the Telegram bot chat; `/api/auth/verify` exchanges it for the session cookie. Two middleware: `auth_middleware` (inner) and `security_headers_middleware` (outer, adds CSP — no inline scripts allowed)
+- **Bootstrap flow** (`_bootstrap_monitor_user`): creates hardened `monitor` user on remote host via root SSH, installs ed25519 key with SSH restrictions
+- **Telegram notifications** (`_check_and_notify`): threshold-based alerts with configurable delay (consecutive cycles), recovery messages
+- **CSV logging**: per-server daily files in `logs/`, 30-day rotation, used for traffic volume calculations
+- **Background collector** (`_background_collector`): runs in a loop at `refresh_interval_sec`, triggers metrics collection, logging, and notifications
+
+**Frontend** (`app/static/index.html` markup + `app/static/app.js` logic) — vanilla JS SPA, no build step. The script is a separate file because CSP forbids inline script; bump `?v=` in the script tag when changing it. Dark/light themes, RU/EN i18n, sortable table.
+
+## Config Files
+
+- `config/servers.yaml` — main runtime config (gitignored, contains server IPs/credentials)
+- `config/auth.yaml` — auth state: password hash, sessions, login history (gitignored)
+- `config/servers.example.yaml` — safe example, committed and validated in CI
+
+## CI/CD and production
+
+- GitHub Actions (`.github/workflows/deploy.yml`): on push to `main` — syntax check, config validation, pytest only. It does **not** deploy.
+- Legacy CT120 on Giga (`/opt/servers-info-dash`) pulls `origin/main` every 5 min via `dash-autodeploy.timer` — a push to `main` deploys there.
+- The public Info runs on RU2 as a Docker image built from `deploy/ru2/Dockerfile` with `recovery_app.py` as entrypoint (wraps `app.main`). Project summaries come from collectors on RU3 (`deploy/collectors/*.py`) and are copied to RU2 by a timer on LV3. Full map: `deploy/README.md`. Backups: `deploy/backups/README.md`.
+
+## Key Design Decisions
+
+- All remote metrics collected in a **single SSH command** per server (not multiple connections)
+- Error tolerance: up to 5 consecutive SSH failures use cached data before marking server DOWN
+- Network interface auto-detection (highest-traffic non-loopback) when not specified
+- Bot token can be provided via `TELEGRAM_BOT_TOKEN` env var (overrides config)
+- `X-Forwarded-For` is explicitly ignored (direct client IP only)
+- SSH `known_hosts` is strictly required — no auto-accept of host keys

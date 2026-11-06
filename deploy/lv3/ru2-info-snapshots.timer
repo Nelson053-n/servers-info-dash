@@ -1,0 +1,8 @@
+[Unit]
+Description=Keep Info project snapshots fresh after migration to RU2
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+[Install]
+WantedBy=timers.target

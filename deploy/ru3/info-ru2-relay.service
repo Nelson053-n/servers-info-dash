@@ -1,0 +1,13 @@
+[Unit]
+Description=Private Info backend on RU2 and return path to RU3 local home health probe
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/ssh -NT -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/info-ru2-relay/known_hosts -o ControlMaster=no -o ControlPath=none -o ConnectionAttempts=1 -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -i /root/info-ru2-relay/id_ed25519 -L 127.0.0.1:18003:127.0.0.1:8003 -R 127.0.0.1:18080:127.0.0.1:18080 info-relay@RU2_HOST
+Restart=no
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

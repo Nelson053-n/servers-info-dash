@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Info Otpuska snapshot every ten minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Unit=infodash-otpuska.service
+
+[Install]
+WantedBy=timers.target

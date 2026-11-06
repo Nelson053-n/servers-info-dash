@@ -1,0 +1,30 @@
+name: info-recovery
+services:
+  app:
+    image: recovery-info:file-stale-fix-20261106
+    restart: unless-stopped
+    network_mode: host
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.25
+    pids_limit: 96
+    volumes:
+    - ./config:/app/config
+    - ./logs:/app/logs
+    - ./secrets:/run/secrets:ro
+    - /var/lib/infodash/projects:/var/lib/infodash/projects:ro
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8003/api/health",timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      start_period: 45s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '3'

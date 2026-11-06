@@ -1,0 +1,11 @@
+[Unit]
+Description=Readonly recovery summaries for Info project cards
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/info-collectors/info-business-collect.py
+TimeoutStartSec=240
+Nice=10
+CPUQuota=15%
+MemoryMax=96M
+UMask=0077

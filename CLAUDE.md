@@ -28,7 +28,7 @@ python -c "import yaml; from pathlib import Path; d=yaml.safe_load(Path('config/
 
 ## Architecture
 
-**Single-file backend** (`app/main.py`, ~2400 lines) — everything lives in one FastAPI module:
+**Backend** — `app/main.py` (FastAPI, monitoring core) plus `app/projects.py` (Projects tab: project summaries, site checks, analytics documents):
 
 - **Pydantic models** (top): `AppConfig`, `ServerConfig`, `BotConfig`, `SSHSettings`, request/response models
 - **`MetricsCollector` class**: core engine — collects metrics from all servers in parallel via `asyncio.gather`. Remote data fetched with a single SSH command per server per cycle (reads `/proc/stat`, `/proc/meminfo`, `/proc/net/dev`, `/proc/uptime`, `df`). CPU/network rates are delta-based (needs two samples). Supports normal (ephemeral connections) and persistent (pooled with keepalive) SSH modes via `asyncssh`
@@ -46,9 +46,11 @@ python -c "import yaml; from pathlib import Path; d=yaml.safe_load(Path('config/
 - `config/auth.yaml` — auth state: password hash, sessions, login history (gitignored)
 - `config/servers.example.yaml` — safe example, committed and validated in CI
 
-## CI/CD
+## CI/CD and production
 
-GitHub Actions (`.github/workflows/deploy.yml`): on push to `main` — syntax check, config validation, pytest → SSH deploy to `/opt/servers-info-dash`, systemd restart with health check.
+- GitHub Actions (`.github/workflows/deploy.yml`): on push to `main` — syntax check, config validation, pytest only. It does **not** deploy.
+- Legacy CT120 on Giga (`/opt/servers-info-dash`) pulls `origin/main` every 5 min via `dash-autodeploy.timer` — a push to `main` deploys there.
+- The public Info runs on RU2 as a Docker image built from `deploy/ru2/Dockerfile` with `recovery_app.py` as entrypoint (wraps `app.main`). Project summaries come from collectors on RU3 (`deploy/collectors/*.py`) and are copied to RU2 by a timer on LV3. Full map: `deploy/README.md`. Backups: `deploy/backups/README.md`.
 
 ## Key Design Decisions
 

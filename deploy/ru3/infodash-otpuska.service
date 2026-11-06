@@ -1,0 +1,12 @@
+[Unit]
+Description=Info: read-only Otpuska HTTP aggregate snapshot
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/info-collectors/otpuska.py
+UMask=0077
+TimeoutStartSec=120
+MemoryMax=96M
+CPUQuota=25%
+NoNewPrivileges=true
