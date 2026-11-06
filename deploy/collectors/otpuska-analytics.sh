@@ -4,7 +4,9 @@
 # с vm-claude: собирает документ на bob (ssh bob, только чтение — SELECT, docker ps, df) и
 # кладёт готовый файл на хост дашборда. Крон пользователя nel на vm-claude, раз в 10 мин.
 set -u
-DASH_HOST=${DASH_HOST:-root@212.8.228.248}
+# LEGACY с 04.11.2026: заменён на RU3 /opt/info-collectors/otpuska.py (infodash-otpuska.timer).
+# Прежний хост дашборда 212.8.228.248 выведен после атаки; SSH-маршрута к bob сейчас нет.
+DASH_HOST=${DASH_HOST:?LEGACY: задайте DASH_HOST явно — дефолтный 212.8.228.248 выведен}
 DEST=${DEST:-/var/lib/infodash/projects/otpuska.json}
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT

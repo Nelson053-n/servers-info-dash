@@ -15,7 +15,7 @@ VL = dt.timezone(dt.timedelta(hours=10))
 today = dt.datetime.now(VL).date()
 days = [(today - dt.timedelta(days=29 - i)).isoformat() for i in range(30)]
 # Свой IP — это проверки дашборда и curl с сервера, не посетители
-OWN = {"212.8.228.248", "127.0.0.1"}
+OWN = {"91.212.150.163", "127.0.0.1"}  # RU3 с 05.11.2026; 212.8.228.248 выведен
 BOT = re.compile(r"bot|crawl|spider|slurp|curl|python|wget|httpx|go-http|headless|monitor|uptime|preview", re.I)
 LINE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) \S+ "[^"]*" "([^"]*)"')
 ASSET = re.compile(r"^/(_next|favicon|api/|.*\.(js|css|png|jpe?g|svg|ico|webp|woff2?|map|txt|xml)$)")
