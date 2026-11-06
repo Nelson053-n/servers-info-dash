@@ -446,8 +446,9 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
             bad.append("сайт не отвечает" if chk["http"] is None else f"сайт отвечает {chk['http']}")
         elif chk["http"] >= 400:
             warn.append(f"сайт отвечает {chk['http']}")
-        elif chk["ms"] > _SLOW_MS:
-            warn.append(f"медленный ответ {chk['ms']} мс")
+        elif chk["ms"] > _SLOW_MS and chk.get("slow_streak", _SLOW_STREAK) >= _SLOW_STREAK:
+            # один медленный замер — шум сети/нагрузки; замечание — только если медленно N циклов подряд
+            warn.append(f"медленный ответ {chk['ms']} мс ({chk.get('slow_streak', _SLOW_STREAK)} проверки подряд)")
     tls = project.get("tls")
     if tls:
         if tls["error"]:
@@ -481,6 +482,8 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
 
 
 _tls_fail_streak: dict[str, int] = {}
+_slow_streak: dict[str, int] = {}
+_SLOW_STREAK = 3
 
 
 async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
@@ -496,6 +499,10 @@ async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
             streak = _tls_fail_streak.get(p.tls_host, 0) + 1 if tls.get("error") else 0
             _tls_fail_streak[p.tls_host] = streak
             tls = {**tls, "fail_streak": streak}
+        if check and check.get("ms") is not None and check.get("http") is not None:
+            slow = _slow_streak.get(p.id, 0) + 1 if check["ms"] > _SLOW_MS else 0
+            _slow_streak[p.id] = slow
+            check = {**check, "slow_streak": slow}
         _drop_muted(doc, p.mute_alerts)
         _separate_coverage_limits(doc)
         row = {"id": p.id, "name": p.name, "stage": p.stage, "link": p.link, "note": p.note,

@@ -254,3 +254,12 @@ def test_single_tls_failure_is_warning_and_repeat_is_bad():
     assert state == "warn" and "разовый сбой" in issues[0]["text"]
     state, _ = projects._state_of(_row(tls={**one, "fail_streak": 2}))
     assert state == "bad"
+
+
+def test_slow_response_warns_only_after_three_slow_checks_in_a_row():
+    chk = {"http": 200, "ms": 5000, "error": None}
+    for streak in (1, 2):
+        state, issues = projects._state_of(_row(check={**chk, "slow_streak": streak}))
+        assert state == "ok" and not issues
+    state, issues = projects._state_of(_row(check={**chk, "slow_streak": 3}))
+    assert state == "warn" and issues[0]["text"] == "медленный ответ 5000 мс (3 проверки подряд)"
