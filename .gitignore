@@ -30,3 +30,8 @@ logs/
 # OS
 Thumbs.db
 .DS_Store
+
+# Local tooling / agent artefacts
+node_modules/
+handoffs/
+.pytest_cache/
