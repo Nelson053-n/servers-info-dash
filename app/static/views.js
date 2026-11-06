@@ -3,11 +3,16 @@
    Данные: /api/projects, /api/projects/<id> (формат docs/analytics-schema.md), /api/metrics. */
 (function () {
   "use strict";
+  // Cached HTML can reference an older stylesheet than this script.
+  const shellStyle = document.querySelector('link[rel="stylesheet"][href*="/static/shell.css"]');
+  const requiredStyle = "/static/shell.css?v=1d6bcbe54a5b";
+  if (shellStyle && shellStyle.getAttribute("href") !== requiredStyle) shellStyle.href = requiredStyle;
   const VIEWS = ["overview", "tasks", "projects", "servers", "tls"];
   const SVG = "http://www.w3.org/2000/svg";
   const STATE = {ok: "норма", warn: "замечания", bad: "проблема"};
   const SEV = {bad: "Срочно", warn: "Проверить"};
   let overview = null, metrics = null, current = {view: "overview", id: null}, timer = null, projFilter = "all", retrying = false, details = {};
+  const openDisclosures = new Set();
 
   /* ---------- утилиты ---------- */
   const $ = (id) => document.getElementById(id);
@@ -17,6 +22,15 @@
     if (text != null) e.textContent = text;
     return e;
   };
+  function disclosure(key, cls, title) {
+    const box = el("details", cls);
+    box.open = openDisclosures.has(key);
+    box.append(el("summary", null, title));
+    box.addEventListener("toggle", () => {
+      if (box.open) openDisclosures.add(key); else openDisclosures.delete(key);
+    });
+    return box;
+  }
   const svg = (tag, attrs) => {
     const e = document.createElementNS(SVG, tag);
     for (const k in attrs || {}) e.setAttribute(k, attrs[k]);
@@ -24,11 +38,13 @@
   };
   const nf = (v, d) => Number(v).toLocaleString("ru-RU", {maximumFractionDigits: d == null ? 2 : d});
   function fmtValue(v, unit) {
-    if (v == null || v === "") return "—";
+    if (v == null || v === "") return "нет данных";
+    if (typeof v === "string" && /^-?\d+(\.\d+)?$/.test(v)) v = Number(v);
     if (typeof v !== "number") return String(v);
     const a = Math.abs(v);
     let s;
-    if (unit === "$") s = a < 1 ? nf(v, 4) : a >= 10000 ? nf(v, 0) : nf(v, 2);
+    if (unit === "₽" || unit === "RUB") s = nf(v, 2);
+    else if (unit === "$") s = a < 1 ? nf(v, 4) : a >= 10000 ? nf(v, 0) : nf(v, 2);
     else if (a >= 1e6) s = nf(v / 1e6, 2) + " млн";
     else if (a >= 1e5) s = nf(v / 1e3, 0) + " тыс";
     else s = nf(v, a < 10 ? 2 : a < 100 ? 1 : 0);
@@ -67,13 +83,54 @@
     return s;
   }
   function kpiStat(k) {
-    const txt = fmtValue(k.value, k.unit);
+    const txt = k.status === "not_applicable" ? "не применимо" : fmtValue(k.value, k.unit);
     let note = null, noteCls = null;
     if (typeof k.delta === "number") {
       note = (k.delta >= 0 ? "▲ +" : "▼ ") + nf(k.delta, 1) + " %" + (k.delta_label ? " " + k.delta_label : "");
       noteCls = k.delta >= 0 ? "pos" : "neg";
     }
-    return stat(k.label, txt, {state: k.state, long: isLong(txt), note, noteCls, hint: k.hint});
+    const metaText = (v) => v && typeof v === "object" ? [v.label, v.kind, v.from, v.to, v.as_of, v.original].filter(Boolean).join(" · ") : v;
+    const states = {historical: "исторические данные", snapshot: "историческая копия", not_applicable: "не применимо", stale_error: "устарело / ошибка", unknown: "нет данных", partial: "неполно", stale: "устарело", error: "ошибка источника"};
+    const provenance = [states[k.status], metaText(k.period), metaText(k.source),
+      k.last_success ? "успешно: " + new Date(k.last_success).toLocaleString("ru-RU") : null, k.error].filter(Boolean).join(" · ");
+    const item = stat(k.label, txt, {state: k.state || (k.status && k.status !== "ok" ? "warn" : "ok"), long: isLong(txt), note, noteCls});
+    if (states[k.status]) item.append(el("span", "metric-status", states[k.status]));
+    if (provenance || k.hint) {
+      const info = disclosure("metric:" + current.id + ":" + k.id, "metric-info", "Источник и период");
+      info.append(el("p", null, [k.hint, provenance].filter(Boolean).join(" · ")));
+      item.append(info);
+    }
+    return item;
+  }
+
+  function primaryKpis(kpis, limit, projectId) {
+    const relevant = (kpis || []).filter((k) => k.status !== "not_applicable");
+    const preferred = {
+      vpn: ["active_keys", "online_now", "nodes", "rf_exits", "revenue_month", "payments_24h"],
+      otpuska: ["employees", "participants", "employees_in_approval", "campaign"],
+      bonds: ["users", "portfolios", "portfolio_items"],
+      flux: ["my_active", "balance_flux", "mined", "pa_claimable", "price", "fleet_uptime"],
+      "info-public": ["projects", "sources_with_success", "incomplete_sources"],
+    };
+    const first = (preferred[projectId] || []).map((id) => relevant.find((k) => k.id === id)).filter(Boolean);
+    const rest = relevant.filter((k) => !first.includes(k));
+    return first.concat(rest.filter((k) => k.value != null), rest.filter((k) => k.value == null)).slice(0, limit);
+  }
+
+  function metricCaption(k) {
+    const labels = {
+      audit_gross_captured: "Поступления проверенного магазина",
+      audit_paid_count: "Подтверждённые оплаты",
+      google_certificates: "Сертификаты в Google-аудите",
+      google_face_value: "Номиналы сертификатов · не остаток",
+    };
+    return labels[k.id] || k.label;
+  }
+
+  function historyCaption(k) {
+    const period = typeof k.period === "string" ? k.period : JSON.stringify(k.period || {});
+    const dates = [...new Set(period.match(/\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4}/g) || [])];
+    return "История" + (dates.length ? " · " + dates.map((d) => d.includes("-") ? d.split("-").reverse().join(".") : d).join(" — ") : "");
   }
 
   /* ---------- графики (SVG) ---------- */
@@ -108,11 +165,12 @@
     const m = opts.spark ? {l: 0, r: 0, t: 3, b: 1} : {l: 52, r: 12, t: 10, b: 26};
     const ih = H - m.t - m.b;
     const stacked = chart.kind === "bar" && series.length > 1;
-    const val = (s, i) => Number((s.points[i] || [])[1]) || 0;
-    const totals = xs.map((_, i) => series.reduce((a, s) => a + val(s, i), 0));
+    const val = (s, i) => { const v = (s.points[i] || [])[1]; return v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v); };
+    const totals = xs.map((_, i) => series.some((s) => val(s, i) == null) ? null : series.reduce((a, s) => a + val(s, i), 0));
     const posSum = xs.map((_, i) => series.reduce((a, s) => a + Math.max(0, val(s, i)), 0));
     const negSum = xs.map((_, i) => series.reduce((a, s) => a + Math.min(0, val(s, i)), 0));
-    const vals = series.flatMap((s) => s.points.map((p) => Number(p[1]) || 0));
+    const vals = series.flatMap((s) => s.points.map((_, i) => val(s, i))).filter((v) => v != null);
+    if (!vals.length) { box.append(el("p", "muted", "Нет данных за период")); return; }
     let lo = stacked ? Math.min(...negSum) : Math.min(...vals);
     let hi = stacked ? Math.max(...posSum) : Math.max(...vals);
     /* уровень далеко от нуля (курс, стоимость портфеля): ось по диапазону данных, иначе линия плоская */
@@ -163,9 +221,10 @@
       });
     } else {
       series.forEach((s, si) => {
-        const pts = s.points.map((p, i) => [xc(i), y(Number(p[1]) || 0)]);
-        const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
-        if (series.length === 1) {
+        const pts = s.points.map((_, i) => val(s, i) == null ? null : [xc(i), y(val(s, i))]);
+        let connected = false;
+        const d = pts.map((p) => { if (!p) { connected = false; return ""; } const command = connected ? "L" : "M"; connected = true; return command + p[0].toFixed(1) + " " + p[1].toFixed(1); }).join(" ");
+        if (series.length === 1 && pts.every(Boolean)) {
           const base = level ? y(minV) : y(Math.max(minV, Math.min(0, maxV)));
           root.append(svg("path", {d: d + ` L ${pts[pts.length - 1][0].toFixed(1)} ${base} L ${pts[0][0].toFixed(1)} ${base} Z`,
             fill: colorFor(s.name, si), opacity: 0.12}));
@@ -224,7 +283,7 @@
     card.append(top);
     if (a && a.kpis && a.kpis.length) {
       const k = el("div", "pcard-kpis");
-      a.kpis.forEach((x) => {
+      primaryKpis(a.kpis, 4, p.id).forEach((x) => {
         const cell = el("div");
         const txt = fmtValue(x.value, x.unit);
         cell.append(el("div", "pk-label", x.label), el("div", "pk-value" + (isLong(txt) ? " long" : "") + (x.state && x.state !== "ok" ? " " + x.state : ""), txt));
@@ -233,7 +292,7 @@
       });
       card.append(k);
     } else {
-      card.append(el("p", "muted", a && a.error ? a.error : "Подробной аналитики нет — только сайт и сертификат"));
+      card.append(el("p", "muted", "Аналитика пока недоступна"));
     }
     if (a && a.spark) {
       const sp = el("div", "pcard-spark");
@@ -385,17 +444,8 @@
     return items.sort((a, b) => (a.sev === "bad" ? 0 : 1) - (b.sev === "bad" ? 0 : 1));
   }
   function headline(items) {
-    const bad = items.filter((i) => i.sev === "bad"), warn = items.filter((i) => i.sev !== "bad");
-    const parts = [];
-    const srv = bad.filter((i) => i.kind === "server").length, prj = bad.filter((i) => i.kind === "project").length, tls = bad.filter((i) => i.kind === "tls").length;
-    if (srv) parts.push(`${srv} ${plural(srv, "сервера", "серверов", "серверов")}`);
-    if (prj) parts.push(`${prj} ${plural(prj, "проблемы в проекте", "проблем в проектах", "проблем в проектах")}`);
-    if (tls) parts.push("сертификатов");
-    const h = el("h1", "headline");
-    if (parts.length) { h.append(document.createTextNode("Всё работает, кроме "), el("span", "hl-bad", parts.join(" и ")), document.createTextNode(".")); }
-    else h.append(document.createTextNode("Всё работает."));
-    if (warn.length) { h.append(el("br")); h.append(el("span", "hl-sub", `${warn.length === 1 ? "Ещё 1 пункт" : `Ещё ${warn.length} ${plural(warn.length, "пункт", "пункта", "пунктов")}`} стоит проверить.`)); }
-    else if (!parts.length) { h.append(el("br")); h.append(el("span", "hl-sub", "Замечаний нет.")); }
+    const h = el("h1", "headline", "Состояние инфраструктуры");
+    h.append(el("br"), el("span", "hl-sub", items.length ? "Есть замечания — подробности ниже" : "Открытых замечаний нет"));
     return h;
   }
   function attentionV2(items) {
@@ -419,16 +469,29 @@
     if (nHidden) head.append(showAll);
     card.append(head);
     const grid = el("div", "ins-grid");
-    shown.forEach((it) => grid.append(insRow(it, renderOverview)));
+    shown.slice(0, 4).forEach((it) => {
+      const row = insRow(it, renderOverview);
+      row.classList.add("overview-issue");
+      grid.append(row);
+    });
     card.append(grid);
+    const more = el("a", "section-link", "Все замечания · " + shown.length);
+    more.href = "#tasks";
+    card.append(more);
     return card;
   }
   function insRow(it, rerender) {
     const row = el("div", "ins");
     row.append(el("span", "ins-dot " + it.sev));
     const body = el("div", "ins-body"), top = el("div", "ins-top");
-    top.append(el("b", null, it.title), el("span", "ins-src", it.src));
+    const title = issueTitle(it.title);
+    top.append(el("b", null, title), el("span", "ins-src", it.src));
     body.append(top);
+    if (title !== it.title) {
+      const detail = disclosure("issue:" + it.key, "issue-detail", "Технические подробности");
+      detail.append(el("p", null, it.title));
+      body.append(detail);
+    }
     if (it.text) body.append(el("div", "ins-text", it.text));
     const acts = el("div", "ins-acts");
     const open = el("a", "btn small", it.kind === "server" ? "Открыть сервер" : "Открыть"); open.href = it.href;
@@ -438,6 +501,16 @@
     body.append(acts);
     row.append(body);
     return row;
+  }
+
+  function issueTitle(text) {
+    if (/Metric absent from successful aggregate/.test(text)) return "Не получены основные показатели сводки";
+    if (/reconciled|прибыль неизвестна/i.test(text)) return "Прибыль пока не подтверждена";
+    if (/native ledger|ledger\/cost coverage/i.test(text)) return "История выплат и расходов неполная";
+    if (/BobSSH|OPS capability|Некоммерческий HR/i.test(text)) return "Служебные метрики доступны не полностью";
+    if (/текущей выручки|текущих поступлений|себестоимост.*не|полных.*баланс/i.test(text)) return "Финансовые данные пока не восстановлены полностью";
+    if (/Traceback|Exception|last_success|apiRequestId|not zero|не0|неbad|readonly/i.test(text) || text.length > 180) return "Источник данных требует проверки";
+    return text;
   }
   function renderTasks() {
     const v = $("tasksView");
@@ -476,49 +549,18 @@
     }
   }
 
-  /* ---------- доход по месяцам ---------- */
-  function moneyCards() {
-    const out = [];
-    Object.values(details).forEach((d) => {
-      const a = d && d.analytics;
-      const k = a && (a.kpis || []).find((x) => x.id === "revenue_month");
-      if (!k) return;
-      const prev = (a.kpis || []).find((x) => x.id === "revenue_prev_month");
-      const chart = (a.charts || []).find((c) => c.id === "revenue_monthly");
-      const card = el("section", "card money");
-      card.id = "money";
-      const head = el("div", "card-head"); head.append(el("h2", null, d.name + " — доход"), el("span", "muted", k.hint || ""));
-      card.append(head);
-      const row = el("div", "money-row");
-      const main = el("div"); main.append(el("div", "stat-label", k.label), el("div", "money-value", fmtValue(k.value, k.unit)));
-      row.append(main);
-      if (typeof k.delta === "number") {
-        const d2 = el("div", "money-delta");
-        d2.append(el("div", k.delta >= 0 ? "pos" : "neg", (k.delta >= 0 ? "▲ +" : "▼ ") + nf(k.delta, 1) + " % " + (k.delta_label || "")));
-        row.append(d2);
-      }
-      if (prev) { const p = el("div"); p.append(el("div", "stat-label", prev.label), el("div", "money-prev", fmtValue(prev.value, prev.unit))); row.append(p); }
-      card.append(row);
-      if (chart) { const box = el("div", "pj-chart money-chart"); card.append(box); requestAnimationFrame(() => drawChart(box, chart)); }
-      /* окно графика — 12 месяцев, то есть текущий год он покрывает целиком */
-      const year = String(new Date().getFullYear());
-      const ytd = ((chart && chart.series && chart.series[0] && chart.series[0].points) || []).filter((p) => String(p[0]).slice(0, 4) === year);
-      if (ytd.length) card.append(el("div", "money-ytd", "С начала года: " + fmtValue(ytd.reduce((s, p) => s + (Number(p[1]) || 0), 0), k.unit)));
-      out.push(card);
-    });
-    return out;
-  }
-
   /* ---------- матрица связности с пингом ---------- */
   function matrixGrid(mx, serversRows) {
-    const cols = mx.columns || [];
+    const indexes = (mx.columns || []).map((_, i) => i).filter((i) => !(mx.rows && mx.rows.length && mx.rows.every((r) => (r.cells || [])[i]?.state === "off")));
+    const cols = indexes.map((i) => mx.columns[i]);
+    const rows = (mx.rows || []).map((r) => ({...r, cells: indexes.map((i) => (r.cells || [])[i] || {state: "unknown", title: "Нет данных"})}));
     const country = {};
     (serversRows || []).forEach((s) => { if (s.name && s.country) country[s.name] = s.country; });
     /* подпись колонки — страна ноды-выхода (FI, FI2…), имя ноды берём из подсказок клеток */
     const seen = {};
     const heads = cols.map((c, i) => {
       let node = null;
-      (mx.rows || []).forEach((r) => { const t = String(((r.cells || [])[i] || {}).title || "").split(" · "); if (!node && t[1] && !/выключен|нет на этой|не ответила/.test(t[1])) node = t[1]; });
+      rows.forEach((r) => { const t = String(((r.cells || [])[i] || {}).title || "").split(" · "); if (!node && t[1] && !/выключен|нет на этой|не ответила/.test(t[1])) node = t[1]; });
       if (!node) return {label: c, title: c};
       const cc = country[node] && country[node] !== "—" ? country[node] : node.slice(0, 3);
       seen[cc] = (seen[cc] || 0) + 1;
@@ -529,7 +571,7 @@
     grid.append(el("span"));
     heads.forEach((h) => { const s = el("span", "mh", h.label); s.title = h.title; grid.append(s); });
     grid.append(el("span", "mh", ""));
-    (mx.rows || []).forEach((r) => {
+    rows.forEach((r) => {
       grid.append(el("span", "mr", r.label));
       (r.cells || []).forEach((c) => {
         const ping = String(c.title || "").match(/(\d+)\s*мс/);
@@ -560,46 +602,34 @@
   const serversTableOf = (an) => ((an && an.tables) || []).find((t) => t.id === "servers");
 
   /* ---------- проекты плотным списком ---------- */
-  let listSort = "issues";
   function projectList() {
-    const card = el("section", "card tcard");
+    const card = el("section", "card project-summary");
     card.id = "projects-list";
-    const head = el("div", "card-head");
-    const f = el("div", "filters");
-    [["issues", "Сначала проблемы"], ["money", "По доходу"]].forEach(([k, t]) => {
-      const b = el("button", "", t); b.type = "button"; b.setAttribute("aria-pressed", String(listSort === k));
-      b.addEventListener("click", () => { listSort = k; renderOverview(); });
-      f.append(b);
-    });
-    head.append(el("h2", null, "Проекты"), f);
-    card.append(head);
+    const head = el("div", "card-head"), all = el("a", null, "Все проекты →");
+    all.href = "#projects";
+    head.append(el("h2", null, "Проекты"), all); card.append(head);
+    const list = el("div", "project-rows");
     const order = {bad: 0, warn: 1, ok: 2};
-    const money = (p) => { const k = ((p.analytics && p.analytics.kpis) || []).find((x) => x.unit === "₽" || x.unit === "$"); return k && typeof k.value === "number" ? (k.unit === "$" ? k.value * 80 : k.value) : -1; };
-    const ps = overview.projects.slice().sort(listSort === "money" ? (a, b) => money(b) - money(a) : (a, b) => order[a.state] - order[b.state]);
-    const wrap = el("div", "tscroll"), list = el("div", "plist");
-    ["", "Проект", "Главное", "Деньги", "Ещё", "Динамика", "Сайт · TLS"].forEach((t, i) => list.append(el("span", "ph" + (i === 6 ? " r" : ""), t)));
-    ps.forEach((p) => {
-      const ks = (p.analytics && p.analytics.kpis) || [];
-      const moneyK = ks.find((x) => x.unit === "₽" || x.unit === "$");
-      const rest = ks.filter((x) => x !== moneyK);
-      const cell = (k) => {
-        const s = el("span", "pc");
-        if (!k) { s.append(el("span", "faint", "—")); return s; }
-        const txt = fmtValue(k.value, k.unit);
-        s.append(el("span", isLong(txt) ? "" : "mono", txt), el("span", "pl", " " + k.label.toLowerCase()));
-        if (typeof k.delta === "number") s.append(el("span", k.delta >= 0 ? "pos" : "neg", " " + (k.delta >= 0 ? "+" : "") + nf(k.delta, 1) + " %"));
-        return s;
-      };
-      const dot = el("span", "pc"); dot.append(el("span", "sdot " + p.state));
-      const name = el("a", "pc pname"); name.href = "#projects/" + p.id;
-      name.append(el("b", null, p.name), el("br"), el("span", "pl", p.stage || ""));
-      const spark = el("span", "pc pspark");
-      if (p.analytics && p.analytics.spark) requestAnimationFrame(() => drawChart(spark, p.analytics.spark, {spark: true}));
-      else spark.append(el("span", "faint", p.analytics && p.analytics.error ? "нет данных" : "—"));
-      list.append(dot, name, cell(rest[0]), cell(moneyK), cell(rest[1]), spark, el("span", "pc r mono pl", siteLine(p)));
+    overview.projects.slice().sort((a, b) => order[a.state] - order[b.state]).forEach((p) => {
+      const row = el("a", "project-row"); row.href = "#projects/" + p.id;
+      const name = el("div", "project-name");
+      name.append(el("b", null, p.name), el("span", "muted", p.stage || ""));
+      const recovering = p.state === "ok" && /восстановлен|копи/i.test(p.stage || "");
+      const status = chip(recovering ? "warn" : p.state, recovering ? "Ограничен" : p.state === "ok" ? "В норме" : p.state === "bad" ? "Проблема" : "Проверить");
+      const figures = el("div", "project-figures");
+      const a = (details[p.id] || {}).analytics || p.analytics;
+      primaryKpis(a && a.kpis, 2, p.id).forEach((k) => {
+        const figure = el("div");
+        figure.title = k.label;
+        figure.append(el("span", "figure-value", fmtValue(k.value, k.unit)), el("span", "figure-label", metricCaption(k)));
+        if (k.status && k.status !== "ok") figure.append(el("span", "metric-status", k.status === "historical" || k.status === "snapshot" ? historyCaption(k) : k.value == null ? "Не подтверждено" : "Неполные данные"));
+        figures.append(figure);
+      });
+      if (!figures.children.length) figures.append(el("span", "muted", "Нет подтверждённой аналитики"));
+      row.append(name, status, figures, el("span", "project-site", siteLine(p)));
+      list.append(row);
     });
-    wrap.append(list); card.append(wrap);
-    return card;
+    card.append(list); return card;
   }
 
   /* ---------- трафик по серверам ---------- */
@@ -689,7 +719,7 @@
     left.append(el("div", "eyebrow", new Date().toLocaleDateString("ru-RU", {weekday: "long", day: "numeric", month: "long"}) + " · " + updated()), headline(items));
     const pills = el("div", "hero-pills");
     const pill = (label, val, of, st) => { const p = el("div", "hero-pill" + (st && st !== "ok" ? " " + st : "")); p.append(el("div", "stat-label", label)); const b = el("div", "mono hp-v", String(val)); if (of != null) b.append(el("small", null, "/" + of)); p.append(b); return p; };
-    pills.append(pill("проекты", ps.filter((p) => p.state === "ok").length, ps.length, ps.some((p) => p.state === "bad") ? "bad" : ps.some((p) => p.state === "warn") ? "warn" : "ok"));
+    pills.append(pill("проекты без замечаний", ps.filter((p) => p.state === "ok").length, ps.length, ps.some((p) => p.state === "bad") ? "bad" : ps.some((p) => p.state === "warn") ? "warn" : "ok"));
     const up = servers.filter((s) => s.status === "up").length;
     pills.append(pill("серверы", up, servers.length, up < servers.length ? "bad" : "ok"));
     const exitsK = Object.values(details).map((d) => ((d && d.analytics && d.analytics.kpis) || []).find((k) => k.id === "rf_exits")).find(Boolean);
@@ -697,15 +727,15 @@
     top.append(left, pills);
     v.append(top);
 
-    v.append(rolesCard(), attentionV2(items));
-    const money = moneyCards();
-    if (money.length) { const g = el("div", "grid2"); money.forEach((c) => g.append(c)); v.append(g); }
+    v.append(projectList(), attentionV2(items), rolesCard());
     /* слева матрицы связности и под ними сертификаты — иначе под короткой матрицей пусто, пока справа длинный список трафика */
     const mid = el("div", "grid2"), col = el("div", "stack");
     Object.values(details).forEach((d) => ((d && d.analytics && d.analytics.matrices) || []).forEach((mx) => col.append(matrixCard(mx, (serversTableOf(d.analytics) || {}).rows))));
     col.append(certCard(false));
     mid.append(col, trafficCard());
-    v.append(projectList(), mid);
+    const technical = disclosure("network", "technical-section", "Сеть, сертификаты и трафик");
+    technical.append(mid);
+    v.append(technical);
   }
 
   /* ---------- карточка сервера ---------- */
@@ -902,7 +932,7 @@
           const v = r[c.key], td = el("td", c.num ? "num" : "");
           if (c.state) td.append(chip(v, {ok: "норма", warn: "внимание", bad: "проблема"}[v] || String(v)));
           else if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) td.textContent = v.slice(8) + "." + v.slice(5, 7) + "." + v.slice(0, 4);
-          else td.textContent = v == null || v === "" ? "—" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
+          else td.textContent = v == null || v === "" ? "нет данных" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
           if (isBlockCol(c) && isYes(v)) td.classList.add("blocked");
           tr.append(td);
         });
@@ -948,17 +978,24 @@
     v.append(crumbs);
     const right = el("div", "filters");
     const shownState = stateOfIssues(p.issues.filter((r) => !snoozed()[issueKey(p, r)]));
-    right.append(chip(shownState, shownState === "ok" ? "работает" : shownState === "warn" ? "есть замечания" : "проблема"));
+    const summaryMissing = shownState === "warn" && p.analytics?.error && p.check?.http >= 200 && p.check.http < 400;
+    right.append(chip(shownState, shownState === "ok" ? "работает" : shownState === "warn" ? summaryMissing ? "сводка неполная" : "есть замечания" : "проблема"));
     if (p.link) { const a = el("a", "btn", "Открыть сайт ↗"); a.href = p.link; a.target = "_blank"; a.rel = "noopener"; right.append(a); }
     const an = p.analytics;
     v.append(viewHead([p.stage, siteLine(p), an && an.age_min != null ? "данные " + ago(an.age_min) : ""].filter(Boolean).join(" · "), p.name, right));
+    const diagnostics = disclosure("diagnostics:" + id, "technical-section project-diagnostics", "Замечания, источники и ограничения");
     const closedHere = [];
     p.issues.forEach((r) => {
       if (snoozed()[issueKey(p, r)]) { closedHere.push(r); return; }
       const d = el("div", "issue" + (r.severity === "bad" ? " bad" : "")), x = el("button", "btn small ghost", "Закрыть на сутки");
       x.type = "button";
       x.addEventListener("click", () => { snooze(issueKey(p, r)); renderRail(); renderProject(id); });
-      d.append(chip(r.severity, SEV[r.severity]), el("span", null, r.text), x); v.append(d);
+      const title = issueTitle(r.text), content = el("span", null, title);
+      if (title !== r.text) {
+        const raw = disclosure("diagnostic:" + id + ":" + r.text, "issue-detail", "Диагностика источника");
+        raw.append(el("p", null, r.text)); content.append(raw);
+      }
+      d.append(chip(r.severity, SEV[r.severity]), content, x); diagnostics.append(d);
     });
     if (closedHere.length) {
       const box = el("details", "issue-closed"), sum = el("summary", null, `Закрыто на сутки: ${closedHere.length}`);
@@ -970,8 +1007,34 @@
       });
       v.append(box);
     }
-    if (!an || an.error) { v.append(el("p", "muted", an && an.error ? an.error : "Подробная аналитика не подключена: видны сайт и сертификат.")); return; }
-    if ((an.kpis || []).length) { const s = el("section", "stats"); s.setAttribute("aria-label", "Ключевые цифры"); an.kpis.forEach((k) => s.append(kpiStat(k))); v.append(s); }
+    if (!an) { v.append(el("p", "muted", "Нет данных: подробная аналитика не подключена.")); return; }
+    if (an.error && !p.issues.some((r) => r.text === an.error)) diagnostics.append(el("p", "source-diagnostic", an.error));
+    if (diagnostics.children.length > 1) v.append(diagnostics);
+    if ((an.limitations || []).length) {
+      const limits = disclosure("limitations:" + id, "technical-section data-limitations", "Ограничения данных · " + an.limitations.length);
+      an.limitations.forEach((item) => {
+        const block = el("section", "source-diagnostic");
+        block.append(el("h3", null, item.title), el("p", null, item.impact), el("p", null, "Как исправить: " + item.action));
+        limits.append(block);
+      });
+      v.append(limits);
+    }
+    const nelsonKpis = p.id === "bonds" ? (an.kpis || []).filter((k) => String(k.id || "").startsWith("nelson_")) : [];
+    const generalKpis = (an.kpis || []).filter((k) => !nelsonKpis.includes(k));
+    const primary = primaryKpis(generalKpis, 6, p.id);
+    if (primary.length) { const s = el("section", "stats"); s.setAttribute("aria-label", "Ключевые цифры"); primary.forEach((k) => s.append(kpiStat(k))); v.append(s); }
+    if (nelsonKpis.length) {
+      const owner = el("section", "card project-owner"), head = el("div", "card-head"), grid = el("div", "stats");
+      owner.setAttribute("aria-labelledby", "nelson-owner-heading");
+      const title = el("h2", null, "Портфель Nelson"); title.id = "nelson-owner-heading";
+      head.append(title); owner.append(head);
+      nelsonKpis.forEach((k) => grid.append(kpiStat(k))); owner.append(grid); v.append(owner);
+    }
+    const extra = generalKpis.filter((k) => !primary.includes(k));
+    if (extra.length) {
+      const more = disclosure("extra:" + id, "technical-section", "Дополнительные показатели · " + extra.length), grid = el("div", "stats");
+      extra.forEach((k) => grid.append(kpiStat(k))); more.append(grid); v.append(more);
+    }
     const blocks = [];
     (an.matrices || []).forEach((mx) => blocks.push(matrixCard(mx, (serversTableOf(an) || {}).rows)));
     (an.charts || []).forEach((c) => {
@@ -980,6 +1043,11 @@
       const box = el("div", "pj-chart");
       card.append(head, box); blocks.push(card);
       requestAnimationFrame(() => drawChart(box, c));
+      if (c.id === "revenue_monthly") {
+        const year = String(new Date().getFullYear());
+        const ytd = ((c.series && c.series[0] && c.series[0].points) || []).filter((pt) => String(pt[0]).slice(0, 4) === year);
+        if (ytd.length && ytd.every((pt) => pt[1] != null && Number.isFinite(Number(pt[1])))) card.append(el("div", "money-ytd", "С начала года по доступному источнику: " + fmtValue(ytd.reduce((sum, pt) => sum + Number(pt[1]), 0), c.unit)));
+      }
     });
     if (blocks.length) { const g = el("div", "grid2"); blocks.forEach((b) => g.append(b)); v.append(g); }
     (an.tables || []).forEach((tb) => v.append(tableCard(tb)));
@@ -1048,11 +1116,11 @@
       const [pr, mr] = await Promise.all([fetch("/api/projects", {cache: "no-store"}), fetch("/api/metrics", {cache: "no-store"})]);
       if (pr.ok) overview = await pr.json();
       if (mr.ok) metrics = await mr.json();
-      /* обзору нужны подробные документы проектов с доходом по месяцам (там же матрица связности) */
-      const want = ((overview && overview.projects) || []).filter((p) => p.analytics && p.analytics.has_revenue_month);
+      /* Подробные документы дают ключевые показатели и матрицы всех проектов. */
+      const want = ((overview && overview.projects) || []).filter((p) => p.analytics != null);
       const got = await Promise.all(want.map((p) => fetch("/api/projects/" + p.id, {cache: "no-store"}).then((r) => r.ok ? r.json() : null).catch(() => null)));
       const next = {};
-      want.forEach((p, i) => { if (got[i]) next[p.id] = got[i]; });
+      want.forEach((p, i) => { if (got[i]) next[p.id] = got[i]; else if (details[p.id]) next[p.id] = details[p.id]; });
       details = next;
       syncClosed();
       if (overview && overview.server_groups && JSON.stringify(window.infoServerGroups) !== JSON.stringify(overview.server_groups)) {

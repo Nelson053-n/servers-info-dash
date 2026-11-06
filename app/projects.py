@@ -6,9 +6,12 @@
 """
 
 import asyncio
+import copy
 import datetime as dt
+import hashlib
 import json
 import logging
+import os
 import shlex
 import socket
 import ssl
@@ -37,7 +40,7 @@ _MAX_DOC = 4 * 1024 * 1024
 class SummarySource(BaseModel):
     # http — GET с Bearer-токеном (amnpanel /api/analytics), file — JSON root-сборщика.
     # amnpanel оставлен для старых конфигов: то же, что http.
-    kind: Literal["http", "amnpanel", "file"]
+    kind: Literal["http", "amnpanel", "file", "kuma-json"]
     url: str | None = None
     token: str | None = None
     path: str | None = None
@@ -51,6 +54,7 @@ class ProjectConfig(BaseModel):
     stage: str = ""
     link: str | None = None
     check_url: str | None = None
+    check_kind: Literal["http", "kuma-entry-page"] = "http"
     # Имя сервера из servers.yaml: проверка сайта выполняется curl'ом на нём, а не с хоста панели
     # (сайт, который пускает только отдельные страны/сети, иначе отвечает панели 403).
     check_via: str | None = None
@@ -102,6 +106,37 @@ def probe_http(url: str) -> dict[str, Any]:
     return {"http": code, "ms": round((time.monotonic() - started) * 1000), "error": error}
 
 
+
+def probe_kuma_entry_page(url: str) -> dict[str, Any]:
+    """Check the public dynamic API; this does not check individual monitors."""
+    started = time.monotonic()
+    code = None
+    error = None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "servers-info-dash/projects"})
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            code = resp.status
+            if code != 200 or resp.geturl() != url:
+                raise ValueError("expected HTTP 200 without redirect")
+            if resp.headers.get_content_type() != "application/json":
+                raise ValueError("expected JSON content type")
+            body = resp.read(_MAX_BODY + 1)
+            if len(body) > _MAX_BODY:
+                raise ValueError("response too large")
+            doc = json.loads(body)
+            if not isinstance(doc, dict):
+                raise ValueError("expected object")
+            key = {"entryPage": "entryPage", "statusPageMatchedDomain": "statusPageSlug"}.get(doc.get("type"))
+            if not key or not isinstance(doc.get(key), str) or not doc[key].strip():
+                raise ValueError("unexpected entry-page schema")
+    except urllib.error.HTTPError as exc:
+        code, error = exc.code, "Kuma API HTTP error"
+    except Exception as exc:
+        error = "Kuma API validation failed: " + type(exc).__name__
+    return {"http": code, "ms": round((time.monotonic() - started) * 1000),
+            "error": error, "valid": error is None, "scope": "kuma-entry-page"}
+
+
 async def probe_via_server(url: str, server_name: str, servers_path: Path = SERVERS_PATH) -> dict[str, Any]:
     """Как probe_http, но curl запускается по ssh на сервере server_name из servers.yaml."""
     started = time.monotonic()
@@ -109,17 +144,25 @@ async def probe_via_server(url: str, server_name: str, servers_path: Path = SERV
         servers = yaml.safe_load(servers_path.read_text(encoding="utf-8")) or {}
         srv = next(x for x in servers["servers"] if x["name"] == server_name)
         known_hosts = str(Path(servers["ssh"]["known_hosts"]).expanduser())
-        cmd = "curl -sS -o /dev/null -m 15 -w '%{http_code}' " + shlex.quote(url)
+        cmd = "curl -sS -o /dev/null -m 15 -w '%{http_code} %{time_total}' " + shlex.quote(url)
         async with asyncssh.connect(
             srv["host"], port=srv.get("port", 22), username=srv["user"],
             client_keys=[srv["client_key"]], known_hosts=known_hosts, connect_timeout=10,
         ) as conn:
             res = await asyncio.wait_for(conn.run(cmd, check=False), timeout=30)
-        code = int(str(res.stdout).strip() or 0) or None   # 000 — curl не дозвонился
+        result = _http_probe_result(res.stdout, time.monotonic() - started)
+        code = result["http"]
         error = None if code else (str(res.stderr).strip() or "curl: нет ответа")[:200]
+        return {**result, "error": error}
     except Exception as exc:  # noqa: BLE001 — любой сбой = проверка не удалась
         code, error = None, f"{type(exc).__name__}: {exc}"[:200]
     return {"http": code, "ms": round((time.monotonic() - started) * 1000), "error": error}
+
+
+def _http_probe_result(stdout: str | bytes, elapsed: float) -> dict[str, Any]:
+    status, duration = (stdout.decode() if isinstance(stdout, bytes) else stdout).strip().split()
+    return {"http": int(status) or None, "ms": round(float(duration) * 1000),
+            "probe_ms": round(elapsed * 1000)}
 
 
 def tls_expiry(host: str, port: int = 443) -> dict[str, Any]:
@@ -139,7 +182,7 @@ def tls_expiry(host: str, port: int = 443) -> dict[str, Any]:
 
 def _doc_age_min(doc: dict[str, Any], fallback_mtime: float | None = None) -> float | None:
     try:
-        ts = dt.datetime.fromisoformat(str(doc.get("generated_at")).replace("Z", "+00:00"))
+        ts = dt.datetime.fromisoformat(str(doc.get("last_success") or doc.get("generated_at")).replace("Z", "+00:00"))
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=dt.timezone.utc)
         return (_now() - ts).total_seconds() / 60
@@ -148,7 +191,89 @@ def _doc_age_min(doc: dict[str, Any], fallback_mtime: float | None = None) -> fl
 
 
 def fetch_analytics(src: SummarySource) -> dict[str, Any]:
+    """Keep the last successful aggregate when a source is temporarily unavailable."""
+    identity = f"{src.kind}:{src.url or src.path}"
+    cache = Path("logs/project-analytics") / (hashlib.sha256(identity.encode()).hexdigest()[:20] + ".json")
+    data = _read_analytics(src)
+    if data.get("error") and not data.get("kpis"):
+        try:
+            previous = json.loads(cache.read_text())
+        except (OSError, ValueError):
+            previous = {}
+        if previous:
+            previous.update(error=data["error"], status="stale", stale=True)
+            for metric in previous.get("kpis", []):
+                metric.update(status="stale" if metric.get("value") is not None else "unknown", error=data["error"])
+            age = _doc_age_min(previous)
+            previous["age_min"] = None if age is None else round(age)
+            return previous
+        return {**data, "status": "unknown", "last_success": None, "kpis": [], "charts": [], "tables": []}
+    data = copy.deepcopy(data)
+    data.setdefault("last_success", data.get("generated_at"))
+    data.setdefault("status", "stale" if data.get("stale") else "ok")
+    for metric in data.get("kpis", []):
+        metric.setdefault("metric", metric.get("id"))
+        metric.setdefault("unit", "")
+        metric.setdefault("period", data.get("period", "период не указан"))
+        metric.setdefault("source", data.get("source", src.url or src.path))
+        metric.setdefault("generated_at", data.get("generated_at"))
+        metric.setdefault("last_success", data.get("last_success") if metric.get("value") is not None else None)
+        metric.setdefault("error", None)
+        metric.setdefault("status", "unknown" if metric.get("value") is None else data["status"])
+        if metric["status"] == "unknown":
+            metric["value"] = None
+            metric["last_success"] = None
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False))
+        temporary.chmod(0o600)
+        os.replace(temporary, cache)
+    except OSError:
+        logger.warning("Could not persist last successful project aggregate")
+    return data
+
+
+
+def _read_kuma_analytics(src: SummarySource) -> dict[str, Any]:
+    # No credentials, redirects or caller-selected destinations.
+    endpoint = "https://kuma.bondai.ru/info-analytics.json"
+    if src.url != endpoint or src.token:
+        return {"error": "Kuma analytics configuration rejected"}
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    try:
+        req = urllib.request.Request(endpoint, headers={"User-Agent": "Info-Kuma-analytics"})
+        with urllib.request.build_opener(NoRedirect()).open(req, timeout=10) as resp:
+            if resp.status != 200 or resp.geturl() != endpoint or resp.headers.get_content_type() != "application/json":
+                raise ValueError("response rejected")
+            raw = resp.read(262145)
+            if len(raw) > 262144:
+                raise ValueError("response too large")
+            data = json.loads(raw)
+        if (not isinstance(data, dict) or data.get("source") != "Kuma · read-only SQLite"
+                or not isinstance(data.get("kpis"), list) or not isinstance(data.get("tables"), list)
+                or not isinstance(data.get("charts"), list) or not data.get("generated_at")):
+            raise ValueError("schema rejected")
+        age = _doc_age_min(data)
+        if age is None or age < -5:
+            raise ValueError("timestamp rejected")
+        data["age_min"] = round(age)
+        data["stale"] = bool(data.get("stale") or data.get("error") or age > src.max_age_min)
+        if data["stale"]:
+            data["status"] = "stale"
+            for metric in data["kpis"]:
+                metric["status"] = "stale" if metric.get("value") is not None else "unknown"
+        return data
+    except Exception:
+        return {"error": "Kuma statistics unavailable or invalid"}
+
+
+def _read_analytics(src: SummarySource) -> dict[str, Any]:
     """Документ аналитики (docs/analytics-schema.md) или {"error": ...}."""
+    if src.kind == "kuma-json":
+        return _read_kuma_analytics(src)
     mtime = None
     if src.kind == "file":
         p = Path(src.path or "")
@@ -173,7 +298,8 @@ def fetch_analytics(src: SummarySource) -> dict[str, Any]:
         return {"error": "источник вернул не документ"}
     age = _doc_age_min(data, mtime)
     data["age_min"] = None if age is None else round(age)
-    data["stale"] = age is not None and age > src.max_age_min
+    data["stale"] = (bool(data.get("stale") or data.get("error") or age is None or age > src.max_age_min)
+                     if src.kind == "file" else age is not None and age > src.max_age_min)
     return data
 
 
@@ -195,13 +321,65 @@ def _drop_muted(doc: dict[str, Any] | None, patterns: list[str]) -> None:
     doc["alerts"] = [a for a in doc["alerts"] if not any(x in str(a.get("text", "")).lower() for x in low)]
 
 
+def _separate_coverage_limits(doc: dict[str, Any] | None) -> None:
+    if not isinstance(doc, dict):
+        return
+    descriptions = {
+        "Monthly native ledger/cost coverage unavailable; not zero": (
+            "monthly_finances", "Неполная история выплат и расходов",
+            "Месячные поступления в FLUX и прибыль не подтверждены. Это не ошибка работы нод.",
+            "Подключить полный журнал выплат и учёт расходов за месяц."),
+        "Расходы/комиссии/возвраты не reconciled; прибыль неизвестна, не0": (
+            "monthly_finances", "Прибыль пока не подтверждена",
+            "Для расчёта прибыли не хватает сверенных расходов, комиссий и возвратов.",
+            "Сверить поступления и расходы за один период."),
+        "Некоммерческий HR сервис; денежный KPI неприменим, не0; Нет BobSSH/SQL/OPS capability; не проверено, не0/неbad": (
+            "server_checks", "Часть серверных проверок недоступна",
+            "Info не проверяет бэкапы, диск, контейнеры и CI. Данные отпусков доступны через HTTP API.",
+            "Восстановить доступ мониторинга к серверным проверкам."),
+        "Не проверены: серверные бэкапы, CI runner, диск и контейнеры (прежний SSH-маршрут недоступен). OPS-метрики требуют отдельного доступа.": (
+            "server_checks", "Часть серверных проверок недоступна",
+            "Info не проверяет бэкапы, диск, контейнеры и CI. Данные отпусков доступны через HTTP API.",
+            "Восстановить доступ мониторинга к серверным проверкам."),
+        "Агрегатный SQL-источник Bob недоступен.; Нужен SSH-доступ к Bob для серверных проверок.": (
+            "hr_sql", "SQL-сводка и серверные проверки недоступны",
+            "Info получает данные через HTTP-туннель, но полная SQL-сводка недоступна.",
+            "Восстановить доступ к агрегатному SQL-источнику Bob и серверным проверкам."),
+        "Для проверки бэкапов, CI runner, диска и контейнеров нужен SSH-доступ к Bob. Текущий сборщик использует HTTP-туннель приложения через RU3.": (
+            "server_checks", "Часть серверных проверок недоступна",
+            "Info не проверяет бэкапы, диск, контейнеры и CI. Данные отпусков доступны через HTTP API.",
+            "Восстановить доступ мониторинга к серверным проверкам."),
+        "Служебные показатели приложения недоступны: у учётной записи сборщика нет права ops.view (HTTP 403). Нужен доступ сборщика к OPS.": (
+            "ops_access", "Нет доступа к служебным показателям OPS",
+            "Учётной записи Info недоступна служебная статистика приложения.",
+            "Согласовать предоставление учётной записи сборщика права ops.view."),
+    }
+    limits = list(doc.get("limitations") or [])
+
+    def separate(text: Any) -> bool:
+        if not isinstance(text, str) or text not in descriptions:
+            return False
+        key, title, impact, action = descriptions[text]
+        if not any(x.get("id") == key for x in limits):
+            limits.append({"id": key, "title": title, "impact": impact, "action": action, "source_message": text})
+        return True
+
+    if separate(doc.get("error")):
+        doc["error"] = None
+    doc["alerts"] = [a for a in doc.get("alerts") or []
+                     if a.get("severity") == "bad" or not separate(a.get("text"))]
+    doc["limitations"] = limits
+
+
 def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     """ok / warn / bad и замечания [{severity, text}]: сайт, сертификат и alerts самого проекта."""
     bad: list[str] = []
     warn: list[str] = []
     chk = project.get("check")
     if chk:
-        if chk["http"] is None or chk["http"] >= 500:
+        if chk.get("valid") is False:
+            bad.append("Kuma API: HTTP/JSON check failed")
+        elif chk["http"] is None or chk["http"] >= 500:
             bad.append("сайт не отвечает" if chk["http"] is None else f"сайт отвечает {chk['http']}")
         elif chk["http"] >= 400:
             warn.append(f"сайт отвечает {chk['http']}")
@@ -230,12 +408,14 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
 async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
     async def one(p: ProjectConfig) -> dict[str, Any]:
         check, tls, doc = await asyncio.gather(
-            (probe_via_server(p.check_url, p.check_via) if p.check_via else asyncio.to_thread(probe_http, p.check_url))
+            (asyncio.to_thread(probe_kuma_entry_page, p.check_url) if p.check_kind == "kuma-entry-page" else
+             probe_via_server(p.check_url, p.check_via) if p.check_via else asyncio.to_thread(probe_http, p.check_url))
             if p.check_url else _none(),
             asyncio.to_thread(tls_expiry, p.tls_host) if p.tls_host else _none(),
             asyncio.to_thread(fetch_analytics, p.analytics) if p.analytics else _none(),
         )
         _drop_muted(doc, p.mute_alerts)
+        _separate_coverage_limits(doc)
         row = {"id": p.id, "name": p.name, "stage": p.stage, "link": p.link, "note": p.note,
                "check": check, "tls": tls, "analytics": doc}
         row["state"], row["issues"] = _state_of(row)
@@ -270,6 +450,10 @@ def _card(doc: dict[str, Any] | None) -> dict[str, Any] | None:
         "error": doc.get("error"),
         "stale": doc.get("stale"),
         "age_min": doc.get("age_min"),
+        "generated_at": doc.get("generated_at"),
+        "last_success": doc.get("last_success"),
+        "status": doc.get("status"),
+        "has_details": bool(doc.get("kpis") or doc.get("tables") or doc.get("charts")),
         "kpis": (doc.get("kpis") or [])[:4],
         "has_revenue_month": any(k.get("id") == "revenue_month" for k in doc.get("kpis") or []),
         "spark": charts[0] if charts else None,
@@ -301,6 +485,10 @@ async def run_forever() -> None:
                 result["ready"] = True
                 _cache.clear()
                 _cache.update(result)
+                for row in result["projects"]:
+                    if (row.get("check") or {}).get("scope") == "kuma-entry-page":
+                        logging.getLogger("uvicorn.error").info("Kuma availability refreshed: id=%s state=%s http=%s valid=%s generated_at=%s",
+                                    row["id"], row["state"], row["check"]["http"], row["check"]["valid"], result["generated_at"])
             delay = cfg.refresh_sec
         except Exception:  # noqa: BLE001 — сборщик не должен умирать от одного сбоя
             logger.exception("projects collector cycle failed")

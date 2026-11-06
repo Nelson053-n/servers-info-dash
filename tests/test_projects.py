@@ -182,7 +182,7 @@ def _servers_file(tmp_path):
 
 def test_check_via_runs_curl_on_remote_server(tmp_path, monkeypatch):
     import asyncio
-    conn = _FakeConn("200")
+    conn = _FakeConn("200 0.221")
     seen = {}
 
     def fake_connect(host, **kw):
@@ -198,7 +198,7 @@ def test_check_via_runs_curl_on_remote_server(tmp_path, monkeypatch):
 
 def test_check_via_curl_failure_and_unknown_server(tmp_path, monkeypatch):
     import asyncio
-    monkeypatch.setattr(projects.asyncssh, "connect", lambda host, **kw: _FakeConn("000", "Could not resolve host"))
+    monkeypatch.setattr(projects.asyncssh, "connect", lambda host, **kw: _FakeConn("000 0.010", "Could not resolve host"))
     res = asyncio.run(projects.probe_via_server("https://x.test", "KZ", _servers_file(tmp_path)))
     assert res["http"] is None and "resolve" in res["error"]
     res = asyncio.run(projects.probe_via_server("https://x.test", "нет-такого", _servers_file(tmp_path)))
