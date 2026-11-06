@@ -1,0 +1,10 @@
+[Unit]
+Description=RU3 network tuning: fq_codel on ens3 + RPS/RFS on both CPUs
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ru3-net-tune.sh
+[Install]
+WantedBy=multi-user.target
