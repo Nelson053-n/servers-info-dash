@@ -28,16 +28,23 @@ def run(args, destination):
         raise RuntimeError('database_or_image_export_failed:'+Path(destination).name)
 
 
-def open_sqlite_source(p, scratch):
-    """Открыть SQLite только для чтения и снять снимок через backup API.
-
-    У базы в режиме WAL в URI mode=ro нет доступа к -shm, и если писатель её сейчас не держит,
-    SQLite отвечает «unable to open database file» — живая БД выглядит сломанной.
-    Тогда копируем db и -wal во временный каталог и читаем копию."""
+def docker_available():
+    """Docker CLI внутри образа выгрузки может не запускаться (старый glibc в образе против нового бинаря хоста).
+    Тогда Docker-часть пропускается с явной пометкой, а файлы и SQLite копируются как обычно."""
     try:
-        return sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30), None
-    except sqlite3.Error as exc:
-        first = exc
+        return bool(subprocess.run(['docker','version','--format','{{.Server.Version}}'],
+                                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15).returncode == 0)
+    except Exception:
+        return False
+
+
+def tool_available(name):
+    return shutil.which(name) is not None
+
+
+def copy_wal_files(p, scratch):
+    """Копия db + -wal (+ -shm) во временный каталог: WAL-базу в режиме только-чтения
+    backup API прочитать не может (нужен -shm), а копию — может."""
     scratch.mkdir(mode=0o700, exist_ok=True)
     copy = Path(scratch)/(p.name+'.copy')
     for suffix in ('', '-wal', '-shm'):
@@ -47,10 +54,40 @@ def open_sqlite_source(p, scratch):
                 Path(str(copy)+suffix).write_bytes(source.read_bytes())
         except OSError:
             pass              # -shm может исчезнуть в любой момент; копия db+wal достаточна
-    try:
-        return sqlite3.connect(copy, timeout=30), 'file_copy_wal'
-    except sqlite3.Error:
-        raise RuntimeError('sqlite_open_failed:'+str(p)) from first
+    return copy
+
+
+def snapshot_sqlite(p, target, scratch):
+    """Снимок живой SQLite через backup API. Возвращает пометку способа или None.
+
+    1) открываем базу как mode=ro и снимаем копию backup API;
+    2) если так не вышло (частый случай: WAL без -shm, writer не держит базу) — повторяем
+       на копии файлов db+wal во временном каталоге.
+    Ошибка в обоих случаях — исключение с путём к файлу."""
+    attempts = [
+        (None, lambda: sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30)),
+        ('file_copy_wal', lambda: sqlite3.connect(copy_wal_files(p, scratch), timeout=30)),
+    ]
+    errors = []
+    for method, opener in attempts:
+        try:
+            source = opener()
+        except sqlite3.Error as exc:
+            errors.append(exc); continue
+        output = None
+        try:
+            output = sqlite3.connect(target)
+            source.backup(output)
+            if output.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                raise RuntimeError('sqlite_integrity_failed:'+str(p))
+            return method
+        except (sqlite3.Error, RuntimeError) as exc:
+            errors.append(exc)
+            target.unlink(missing_ok=True)
+        finally:
+            if output is not None: output.close()
+            source.close()
+    raise RuntimeError('sqlite_snapshot_failed:'+str(p)) from (errors[0] if errors else None)
 
 
 def export(config):
@@ -64,7 +101,8 @@ def export(config):
         raise RuntimeError('source_space_low')
     with tempfile.TemporaryDirectory(prefix='run-', dir=base) as name:
         stage = Path(name);db = stage/'databases';db.mkdir(mode=0o700)
-        excluded = [];verified = [];unreadable = []
+        excluded = [];verified = [];unreadable = [];skipped = []
+        docker_ok = docker_available()
         # SQLite's backup API captures committed WAL data without stopping the application.
         for root in roots:
             for folder, dirs, files in os.walk(root, followlinks=False):
@@ -83,20 +121,12 @@ def export(config):
                         unreadable.append(str(p)); continue
                     target = db/(hashlib.sha256(str(p).encode()).hexdigest()[:16]+'.sqlite')
                     try:
-                        source, method = open_sqlite_source(p, base/'walsrc')
-                        if source is None:
-                            raise RuntimeError('sqlite_open_failed:'+str(p))
-                        output = sqlite3.connect(target)
-                        try:
-                            source.backup(output)
-                            if output.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
-                                raise RuntimeError('sqlite_integrity_failed:'+str(p))
-                        finally:output.close();source.close()
-                    except sqlite3.Error as e:
+                        method = snapshot_sqlite(p, target, base/'walsrc')
+                    except RuntimeError as e:
                         target.unlink(missing_ok=True)
                         if not p.exists() and str(p) not in config.get('required_sqlite', []):
                             continue      # тестовая/временная БД удалена во время копирования — это не ошибка копии
-                        raise RuntimeError('sqlite_open_failed:'+str(p)) from e
+                        raise
                     excluded.extend([str(p).lstrip('/'),str(p).lstrip('/')+'-wal',str(p).lstrip('/')+'-shm',str(p).lstrip('/')+'-journal'])
                     metadata=p.stat()
                     record={'kind':'sqlite','source':str(p),'dump':str(target.relative_to(stage)),'integrity':'passed','uid':metadata.st_uid,'gid':metadata.st_gid,'mode':metadata.st_mode & 0o777}
@@ -105,6 +135,9 @@ def export(config):
                         record['limitation'] = 'WAL-база скопирована файлом (db+wal) во временный каталог, затем backup API'
                     verified.append(record)
         for container in config.get('postgres', []):
+            if not docker_ok:
+                skipped.append({'kind':'postgres_container','container':container,'reason':'docker_cli_unavailable'})
+                continue
             state=json.loads(subprocess.check_output(['docker','inspect',container],stderr=subprocess.DEVNULL,timeout=15))[0]
             if not state['State']['Running']:
                 temporary=state.get('HostConfig',{}).get('Tmpfs') or {}
@@ -135,7 +168,9 @@ def export(config):
                 verified.append({'kind':'postgres','container':container,'database':database,'dump':str(target.relative_to(stage)),'catalog':'passed'})
             run(['docker','exec',container,'sh','-c','exec pg_dumpall -U "$POSTGRES_USER" --roles-only'],db/(container+'-roles.sql'))
         native=config.get('native_postgres')
-        if native:
+        if native and (not docker_ok or not tool_available('pg_dump')):
+            skipped.append({'kind':'native_postgres','reason':'pg_dump_unavailable'})
+        elif native:
             client=['docker','run','--rm','--network','none','--user',str(native['uid']),'--mount','type=bind,src='+native['socket']+',dst='+native['socket']+',readonly',native['image']]
             auth=['-h',native['socket'],'-U','postgres']
             names=subprocess.check_output(client+['psql','-X']+auth+['-d','postgres','-At','-c','SELECT datname FROM pg_database WHERE NOT datistemplate'],stderr=subprocess.DEVNULL,timeout=30).decode().splitlines()
@@ -149,6 +184,9 @@ def export(config):
                 verified.append({'kind':'postgres','container':'native','database':database,'dump':str(target.relative_to(stage)),'catalog':'passed'})
             run(client+['pg_dumpall']+auth+['--roles-only'],db/'native-postgres-roles.sql')
         for entry in config.get('mysql', []):
+            if not docker_ok or not tool_available(entry.get('dumper','mysqldump')):
+                skipped.append({'kind':'mysql','container':entry.get('container'),'reason':'mysql_client_unavailable'})
+                continue
             container=entry['container'];client=entry['client'];dumper=entry['dumper']
             setup=('export MYSQL_PWD="$(cat /run/secrets/db_root_password)"; ' if entry.get('secret_file') else 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; ')
             names=subprocess.check_output(['docker','exec',container,'sh','-c',setup+'exec '+client+' -uroot -N -e "SHOW DATABASES"'],stderr=subprocess.DEVNULL,timeout=30).decode().splitlines()
@@ -158,6 +196,9 @@ def export(config):
                 run(['docker','exec',container,'sh','-c',setup+'exec '+dumper+' -uroot --single-transaction --routines --events --databases "$1"','sh',database],target)
                 verified.append({'kind':'mysql','container':container,'database':database,'dump':str(target.relative_to(stage)),'result':'completed'})
         for container in config.get('redis', []):
+            if not docker_ok:
+                skipped.append({'kind':'redis','container':container,'reason':'docker_cli_unavailable'})
+                continue
             target=db/(container+'.rdb')
             temporary='/tmp/projects-backup-'+secrets.token_hex(16)
             subprocess.run(['docker','exec',container,'mkdir','-m','700','--',temporary],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
@@ -194,9 +235,14 @@ def export(config):
             directory_snapshots.append({'source':str(original),'dump':str(snapshot.relative_to(stage))})
         required=set(config.get('required_sqlite',[]))
         if required-set(x.get('source') for x in verified if x['kind']=='sqlite'):raise RuntimeError('required_sqlite_missing')
-        if config.get('image_containers'):run(['docker','inspect']+config['image_containers'],stage/'containers.json')
+        if config.get('image_containers'):
+            if docker_ok:
+                run(['docker','inspect']+config['image_containers'],stage/'containers.json')
+            else:
+                skipped.append({'kind':'containers_metadata','reason':'docker_cli_unavailable'})
         images=stage/'images';images.mkdir()
-        current_images = sorted({json.loads(subprocess.check_output(['docker','inspect',name],stderr=subprocess.DEVNULL,timeout=15))[0]['Image'] for name in config.get('image_containers',[])}) if config.get('image_containers') else config.get('images',[])
+        current_images = (sorted({json.loads(subprocess.check_output(['docker','inspect',name],stderr=subprocess.DEVNULL,timeout=15))[0]['Image'] for name in config.get('image_containers',[])})
+                          if config.get('image_containers') and docker_ok else config.get('images',[]) if docker_ok else [])
         for image in current_images:
             identity=subprocess.check_output(['docker','image','inspect',image,'--format','{{.Id}}'],stderr=subprocess.DEVNULL,timeout=15).decode().strip()
             cache=base/('image-'+identity.split(':')[-1]+'.tar')
@@ -237,8 +283,10 @@ def export(config):
         for root in roots:original_paths.update(selected_paths(root,excluded_absolute))
         manifest={'schema_version':2,'source':config['source'],'projects':config['projects'],'observed_at':dt.datetime.now(dt.timezone.utc).isoformat(),'databases':verified,'directory_snapshots':directory_snapshots,'roots':[str(p) for p in roots],
                   'unreadable_skipped':sorted(set(unreadable))[:500],
+                  'skipped':skipped,
                   'limitations':['File copies are live; databases use logical dumps/SQLite backup API. PostgreSQL restore catalog check is not an actual database restore.',
-                                 'Files changed while being read are archived as read (tar "file changed as we read it" is accepted).']}
+                                 'Files changed while being read are archived as read (tar "file changed as we read it" is accepted).']
+                  + (['Docker-контейнеры, их базы и образы не снимались: docker/клиенты БД недоступны в образе выгрузки. Файлы и SQLite сохранены.'] if skipped else [])}
         (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
         source_list=stage/'source-paths.list';stage_list=stage/'stage-paths.list'
         source_list.write_bytes(b''.join(os.fsencode(str(p).lstrip('/'))+b'\0' for p in sorted(original_paths)))

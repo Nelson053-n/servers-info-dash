@@ -119,3 +119,53 @@ def test_tar_changed_only_accepts_only_live_file_change_warning():
     assert not m.tar_changed_only(1, b"")
     assert not m.tar_changed_only(1, ok+b"tar: opt/x: Cannot open: Permission denied\n")
     assert not m.tar_changed_only(1, b"tar: opt/x: file changed as we read it\ntar: Exiting with failure status due to previous errors\n")
+
+def test_wal_database_without_shm_is_snapshotted_via_file_copy(tmp_path):
+    """Живая WAL-база в режиме только-чтения не читается backup API, пока писатель не держит -shm.
+    Тогда снимок снимается с копии db+wal — и это отмечается в manifest."""
+    import json, os
+    source=tmp_path/'app';source.mkdir();db=source/'live.db'
+    writer=sqlite3.connect(db);writer.execute('PRAGMA journal_mode=WAL')
+    writer.execute('CREATE TABLE t(id)');writer.execute('INSERT INTO t VALUES(7)');writer.commit()
+    writer.close()                      # WAL остаётся на диске, -shm исчезает вместе с последним соединением
+    assert not (tmp_path/'app'/'live.db-shm').exists()
+    (tmp_path/'.cache').mkdir(exist_ok=True)
+    m.EXPORT_ROOT=tmp_path/'.cache'/'stage'
+    archive=tmp_path/'result.tar'
+    with archive.open('wb') as stream:
+        m.sys.stdout=SimpleNamespace(buffer=stream)
+        m.export(dict(roots=[str(source)],source='test',projects=['test']))
+    with tarfile.open(archive) as tar:
+        manifest=json.load(tar.extractfile('./manifest.json'))
+        record=next(x for x in manifest['databases'] if x['kind']=='sqlite')
+        assert record['integrity']=='passed'
+        member=next(x for x in tar.getmembers() if x.name.endswith(record['dump']))
+        restored=tmp_path/'restored.db';restored.write_bytes(tar.extractfile(member).read())
+    check=sqlite3.connect(restored);assert check.execute('SELECT id FROM t').fetchall()==[(7,)];check.close()
+
+
+def test_missing_docker_skips_container_parts_instead_of_failing(tmp_path, monkeypatch):
+    """В образе выгрузки docker CLI не запускается (glibc). Копия не должна падать:
+    файлы и SQLite сохраняются, Docker-часть уходит в manifest.skipped с ограничением."""
+    import json
+    source=tmp_path/'project';source.mkdir();(source/'code.py').write_text('print(1)')
+    db=sqlite3.connect(source/'app.db');db.execute('CREATE TABLE t(x)');db.execute('INSERT INTO t VALUES(1)');db.commit();db.close()
+    (tmp_path/'.cache').mkdir(exist_ok=True)
+    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'.cache'/'stage')
+    monkeypatch.setattr(m,'docker_available',lambda: False)
+    archive=tmp_path/'result.tar'
+    with archive.open('wb') as stream:
+        monkeypatch.setattr(m.sys,'stdout',SimpleNamespace(buffer=stream))
+        m.export(dict(roots=[str(source)],source='test',projects=['test'],postgres=['pg-int'],mysql=[{'container':'c','dumper':'mysqldump'}],redis=['r'],native_postgres={'socket':'/var/run/postgresql'},image_containers=['pg-int']))
+    with tarfile.open(archive) as tar:
+        manifest=json.load(tar.extractfile('./manifest.json'))
+        kinds={x['kind'] for x in manifest['skipped']}
+        assert kinds=={'postgres_container','mysql','redis','native_postgres','containers_metadata'}
+        assert any('Docker' in x for x in manifest['limitations'])
+        assert any(x['kind']=='sqlite' and x['integrity']=='passed' for x in manifest['databases'])
+        assert any(x.endswith('/code.py') for x in tar.getnames())
+
+
+def test_docker_available_is_false_when_cli_broken(monkeypatch):
+    monkeypatch.setattr(m.subprocess,'run',lambda *a,**k:(_ for _ in ()).throw(FileNotFoundError()))
+    assert m.docker_available() is False
