@@ -39,7 +39,7 @@ def export(config):
         raise RuntimeError('source_space_low')
     with tempfile.TemporaryDirectory(prefix='run-', dir=base) as name:
         stage = Path(name);db = stage/'databases';db.mkdir(mode=0o700)
-        excluded = [];verified = []
+        excluded = [];verified = [];unreadable = []
         # SQLite's backup API captures committed WAL data without stopping the application.
         for root in roots:
             for folder, dirs, files in os.walk(root, followlinks=False):
@@ -48,17 +48,28 @@ def export(config):
                     p = Path(folder)/filename
                     if p.suffix not in {'.db', '.sqlite', '.sqlite3'} or p.is_symlink():
                         continue
-                    with p.open('rb') as stream:
-                        if stream.read(16) != b'SQLite format 3\x00':
-                            continue
-                    target = db/(hashlib.sha256(str(p).encode()).hexdigest()[:16]+'.sqlite')
-                    source = sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30)
-                    output = sqlite3.connect(target)
                     try:
-                        source.backup(output)
-                        if output.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
-                            raise RuntimeError('sqlite_integrity_failed')
-                    finally:output.close();source.close()
+                        with p.open('rb') as stream:
+                            if stream.read(16) != b'SQLite format 3\x00':
+                                continue
+                    except FileNotFoundError:
+                        continue          # временная БД исчезла между обходом и чтением
+                    except PermissionError:
+                        unreadable.append(str(p)); continue
+                    target = db/(hashlib.sha256(str(p).encode()).hexdigest()[:16]+'.sqlite')
+                    try:
+                        source = sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30)
+                        output = sqlite3.connect(target)
+                        try:
+                            source.backup(output)
+                            if output.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                                raise RuntimeError('sqlite_integrity_failed:'+str(p))
+                        finally:output.close();source.close()
+                    except sqlite3.Error as e:
+                        target.unlink(missing_ok=True)
+                        if not p.exists() and str(p) not in config.get('required_sqlite', []):
+                            continue      # тестовая/временная БД удалена во время копирования — это не ошибка копии
+                        raise RuntimeError('sqlite_open_failed:'+str(p)) from e
                     excluded.extend([str(p).lstrip('/'),str(p).lstrip('/')+'-wal',str(p).lstrip('/')+'-shm',str(p).lstrip('/')+'-journal'])
                     metadata=p.stat()
                     verified.append({'kind':'sqlite','source':str(p),'dump':str(target.relative_to(stage)),'integrity':'passed','uid':metadata.st_uid,'gid':metadata.st_gid,'mode':metadata.st_mode & 0o777})
@@ -163,13 +174,23 @@ def export(config):
                 if shutil.disk_usage(base).free < size + minimum_free:raise RuntimeError('image_cache_space_low')
                 tmp=cache.with_suffix('.tmp');run(['docker','image','save',image],tmp);os.replace(tmp,cache)
             os.link(cache,images/cache.name)
-        manifest={'schema_version':2,'source':config['source'],'projects':config['projects'],'observed_at':dt.datetime.now(dt.timezone.utc).isoformat(),'databases':verified,'directory_snapshots':directory_snapshots,'roots':[str(p) for p in roots],'limitations':['File copies are live; databases use logical dumps/SQLite backup API. PostgreSQL restore catalog check is not an actual database restore.']}
-        (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
-        def selected_paths(root,excluded_paths=()):
+        def selected_paths(root,excluded_paths=(),apply_filters=True):
             selected=[]
             def blocked(path):
+                if not apply_filters:return False
                 parts=path.parts
-                return any(x in SKIP for x in parts) or any(parts[i:i+2]==('.next','cache') for i in range(len(parts)-1)) or any(str(path)==x or str(path).startswith(x+'/') for x in excluded_paths)
+                if any(x in SKIP for x in parts) or any(parts[i:i+2]==('.next','cache') for i in range(len(parts)-1)) or any(str(path)==x or str(path).startswith(x+'/') for x in excluded_paths):
+                    return True
+                # Нечитаемое для экспортёра (на рабочей VM он работает не от root) — пропускаем с записью
+                # в manifest, а не роняем всю копию источника ошибкой tar «Cannot open».
+                try:
+                    if path.is_symlink():return False
+                    need=os.R_OK|os.X_OK if path.is_dir() else os.R_OK
+                    if not os.access(path,need):
+                        unreadable.append(str(path));return True
+                except OSError:
+                    return True
+                return False
             if blocked(root):return selected
             selected.append(root)
             if root.is_dir() and not root.is_symlink():
@@ -183,14 +204,29 @@ def export(config):
         original_paths=set()
         excluded_absolute=['/'+x for x in excluded]
         for root in roots:original_paths.update(selected_paths(root,excluded_absolute))
+        manifest={'schema_version':2,'source':config['source'],'projects':config['projects'],'observed_at':dt.datetime.now(dt.timezone.utc).isoformat(),'databases':verified,'directory_snapshots':directory_snapshots,'roots':[str(p) for p in roots],
+                  'unreadable_skipped':sorted(set(unreadable))[:500],
+                  'limitations':['File copies are live; databases use logical dumps/SQLite backup API. PostgreSQL restore catalog check is not an actual database restore.',
+                                 'Files changed while being read are archived as read (tar "file changed as we read it" is accepted).']}
+        (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
         source_list=stage/'source-paths.list';stage_list=stage/'stage-paths.list'
         source_list.write_bytes(b''.join(os.fsencode(str(p).lstrip('/'))+b'\0' for p in sorted(original_paths)))
-        staged=[p for p in selected_paths(stage) if p!=stage and p not in {source_list,stage_list}]
+        staged=[p for p in selected_paths(stage,apply_filters=False) if p!=stage and p not in {source_list,stage_list}]
         stage_list.write_bytes(b''.join(os.fsencode('./'+str(p.relative_to(stage)))+b'\0' for p in staged))
         args=['tar','--create','--file=-','--numeric-owner','--null','--no-recursion','--directory=/','--files-from='+str(source_list),'--directory='+str(stage),'--files-from='+str(stage_list)]
         with (base/'last-tar-error.txt').open('wb') as errors:
             result=subprocess.run(args,stdout=sys.stdout.buffer,stderr=errors,timeout=7200)
-        if result.returncode:raise RuntimeError('file_export_failed_'+str(result.returncode))
+        if result.returncode and not tar_changed_only(result.returncode,(base/'last-tar-error.txt').read_bytes()):
+            raise RuntimeError('file_export_failed_'+str(result.returncode))
+
+
+def tar_changed_only(returncode, stderr):
+    """GNU tar выходит с кодом 1, если живой файл изменился во время чтения (WordPress uploads, логи).
+    Архив при этом полный; принимаем только такой случай — любое другое сообщение или код = ошибка."""
+    if returncode != 1:
+        return False
+    lines = [line for line in stderr.decode('utf-8', 'replace').splitlines() if line.strip()]
+    return bool(lines) and all(line.startswith('tar: ') and line.endswith(': file changed as we read it') for line in lines)
 
 
 if __name__ == '__main__':

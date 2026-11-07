@@ -17,7 +17,8 @@ def test_sqlite_export_includes_committed_wal_and_required_config(tmp_path,monke
     (source/'runtime-config').write_text('restore-required')
     (source/'logs').mkdir();(source/'logs'/'metrics.csv').write_text('historical traffic data')
     (source/'backups').mkdir();(source/'backups'/'old').write_text('saved node configuration')
-    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'stage')
+    (tmp_path/'.cache').mkdir(exist_ok=True)
+    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'.cache'/'stage')
     archive=tmp_path/'result.tar'
     with archive.open('wb') as stream:
         monkeypatch.setattr(m.sys,'stdout',SimpleNamespace(buffer=stream))
@@ -37,7 +38,7 @@ def test_sqlite_export_includes_committed_wal_and_required_config(tmp_path,monke
     restored_db=sqlite3.connect(restored)
     assert restored_db.execute('SELECT id FROM records').fetchall()==[(42,)]
     restored_db.close();connection.close()
-    assert not list((tmp_path/'stage').glob('run-*'))
+    assert not list((tmp_path/'.cache'/'stage').glob('run-*'))
     restore_spec=importlib.util.spec_from_file_location('restore_sqlite',ROOT/'deploy/backups/restore-sqlite.py')
     restore_module=importlib.util.module_from_spec(restore_spec);restore_spec.loader.exec_module(restore_module)
     destination=tmp_path/'isolated';restore_module.restore(archive,destination)
@@ -62,7 +63,8 @@ def test_changing_directory_uses_frozen_copy_set(tmp_path,monkeypatch):
         (folder/'arrived-later.conf').write_text('next run')
         return original_copy(a,b,*args,**kwargs)
     monkeypatch.setattr(m.shutil,'copy2',copy_with_new_arrival)
-    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'stage')
+    (tmp_path/'.cache').mkdir(exist_ok=True)
+    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'.cache'/'stage')
     archive=tmp_path/'result.tar'
     with archive.open('wb') as stream:
         monkeypatch.setattr(m.sys,'stdout',SimpleNamespace(buffer=stream))
@@ -77,7 +79,8 @@ def test_changing_directory_uses_frozen_copy_set(tmp_path,monkeypatch):
 
 def test_tar_uses_frozen_path_set_when_directory_receives_new_files(tmp_path,monkeypatch):
     source=tmp_path/'project';source.mkdir();(source/'initial.txt').write_text('initial')
-    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'stage')
+    (tmp_path/'.cache').mkdir(exist_ok=True)
+    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'.cache'/'stage')
     original_run=m.subprocess.run
     def arrive_at_archive_start(args,*a,**kw):
         if args[0]=='tar':(source/'arrived-later.txt').write_text('next backup')
@@ -90,3 +93,29 @@ def test_tar_uses_frozen_path_set_when_directory_receives_new_files(tmp_path,mon
     with tarfile.open(archive) as tar:
         names=tar.getnames();assert any(x.endswith('/initial.txt') for x in names)
         assert not any(x.endswith('/arrived-later.txt') for x in names)
+
+
+def test_unreadable_files_are_skipped_and_listed_in_manifest(tmp_path,monkeypatch):
+    import json,os
+    if os.geteuid()==0: pytest.skip('root reads everything')
+    source=tmp_path/'project';source.mkdir();(source/'ok.txt').write_text('ok')
+    locked=source/'locked';locked.write_text('');locked.chmod(0)
+    (tmp_path/'.cache').mkdir(exist_ok=True)
+    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'.cache'/'stage')
+    archive=tmp_path/'result.tar'
+    with archive.open('wb') as stream:
+        monkeypatch.setattr(m.sys,'stdout',SimpleNamespace(buffer=stream))
+        m.export(dict(roots=[str(source)],source='test',projects=['test']))
+    with tarfile.open(archive) as tar:
+        names=tar.getnames();assert any(x.endswith('/ok.txt') for x in names) and not any(x.endswith('/locked') for x in names)
+        assert str(locked) in json.load(tar.extractfile('./manifest.json'))['unreadable_skipped']
+    locked.chmod(0o600)
+
+
+def test_tar_changed_only_accepts_only_live_file_change_warning():
+    ok=b"tar: opt/globalauto/site/wp-content: file changed as we read it\n"
+    assert m.tar_changed_only(1, ok)
+    assert not m.tar_changed_only(2, ok)
+    assert not m.tar_changed_only(1, b"")
+    assert not m.tar_changed_only(1, ok+b"tar: opt/x: Cannot open: Permission denied\n")
+    assert not m.tar_changed_only(1, b"tar: opt/x: file changed as we read it\ntar: Exiting with failure status due to previous errors\n")
