@@ -61,3 +61,42 @@ def test_one_failed_host_does_not_flood_panel_with_duplicate_alerts():
     doc=m.analytics(m.validate(d,NOW),NOW)
     assert len([x for x in doc['alerts'] if 'Проекты на RU3' in x['text']])==1
     assert len([x for x in doc['tables'][0]['rows'] if x['status']=='Ошибка копирования'])==7
+
+
+def test_sizes_are_shown_per_source_and_in_total():
+    d=data();d['sources']['ru2']['logical_bytes']=14*1024**3+140*1024**2
+    d['sources']['ru3']=dict(result='success',restore_result='passed',error_code=None,last_backup_success_at=NOW.isoformat(),last_restore_verified_at=NOW.isoformat(),logical_bytes=440*1024**2,protected_projects=['kendo'])
+    doc=m.analytics(m.validate(d,NOW),NOW)
+    size_kpi=next(x for x in doc['kpis'] if x['id']=='size_total')
+    assert size_kpi['unit']=='ГиБ' and size_kpi['value']==round((14*1024**3+140*1024**2+440*1024**2)/1024**3,1)
+    rows=doc['tables'][0]['rows']
+    info_row=next(x for x in rows if x['project']=='Info (публичный)')
+    assert info_row['size']=='14,1 ГиБ'
+    kendo_row=next(x for x in rows if x['project']=='KendoSolki')
+    assert kendo_row['size']=='440 МиБ'
+    assert any(x['key']=='size' for x in doc['tables'][0]['columns'])
+
+
+def test_missing_size_is_not_invented():
+    d=data();d['sources']['ru2']['logical_bytes']=None
+    doc=m.analytics(m.validate(d,NOW),NOW)
+    assert next(x for x in doc['kpis'] if x['id']=='size_total')['value'] is None
+    assert next(x for x in doc['tables'][0]['rows'] if x['project']=='BondAI')['size']=='нет данных'
+    d2=data();del d2['sources']['ru2']['logical_bytes']
+    assert next(x for x in m.analytics(m.validate(d2,NOW),NOW)['tables'][0]['rows'] if x['project']=='BondAI')['size']=='нет данных'
+
+
+def test_size_text_formats_and_rejects_garbage():
+    assert m.size_text(14*1024**3)==('14,0 ГиБ')
+    assert m.size_text(1536*1024**2)=='1,5 ГиБ'
+    assert m.size_text(440*1024**2)=='440 МиБ'
+    assert m.size_text(0)=='0 МиБ'
+    assert m.size_text(2048)=='2 КиБ'
+    for bad in [None,-1,'10',10.5,True]:
+        assert m.size_text(bad)=='нет данных'
+
+
+def test_failed_source_size_is_not_counted_in_total():
+    d=data();d['sources']['ru3']=dict(result='failed',restore_result='unknown',error_code='export_failed',logical_bytes=99*1024**3,protected_projects=[])
+    doc=m.analytics(m.validate(d,NOW),NOW)
+    assert next(x for x in doc['kpis'] if x['id']=='size_total')['value']==round(300/1024**3,1)
