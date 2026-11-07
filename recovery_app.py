@@ -62,10 +62,23 @@ def number(value, divisor=1):
     return None if value is None else round(float(value) / divisor, 3)
 
 
+import time as _time
+
+# Раньше один сбой SSH до панели навсегда (до перезапуска контейнера) ставил bridge_failed=True —
+# и все ноды из панели показывались «не на связи», хотя панель снова отвечала.
+# Теперь — повтор с нарастающей паузой: 1, 2, 5, 10, 15 мин; успех сбрасывает счётчик.
+# Защита от долбёжки сломанной авторизации сохраняется: при постоянной ошибке — одна попытка в 15 мин.
+_BACKOFF_MIN = [1, 2, 5, 10, 15]
+bridge_failures = 0
+bridge_retry_at = 0.0
+bridge_last_error = None
+
+
 async def collect_with_panel():
-    global last_rows, bridge_failed
+    global last_rows, bridge_failed, bridge_failures, bridge_retry_at, bridge_last_error
     data = await original_collect()
     source_error = None
+    bridge_failed = bridge_failures > 0 and _time.monotonic() < bridge_retry_at
     if not bridge_failed:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -90,12 +103,16 @@ async def collect_with_panel():
             rows = json.loads(stdout)['servers']
             assert isinstance(rows, list) and rows
             last_rows = rows
+            bridge_failures, bridge_last_error = 0, None
         except Exception as exc:
-            # Stop failed authentication/connection attempts until operator review.
-            bridge_failed = True
-            source_error = type(exc).__name__
+            bridge_failures += 1
+            bridge_last_error = type(exc).__name__
+            pause = _BACKOFF_MIN[min(bridge_failures, len(_BACKOFF_MIN)) - 1]
+            bridge_retry_at = _time.monotonic() + pause * 60
+            source_error = f'панель недоступна ({bridge_last_error}), повтор через {pause} мин'
     if bridge_failed:
-        source_error = source_error or 'panel bridge paused after connection failure'
+        left = max(0, round((bridge_retry_at - _time.monotonic()) / 60))
+        source_error = f'панель недоступна ({bridge_last_error}), повтор через {left} мин'
     # В панели одна машина может числиться несколькими нодами (разные протоколы на одном IP).
     # Для парка серверов это одна машина: иначе её сбой считается дважды в «на связи» и в замечаниях.
     by_host = {}
