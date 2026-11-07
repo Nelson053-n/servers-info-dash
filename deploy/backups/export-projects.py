@@ -28,6 +28,31 @@ def run(args, destination):
         raise RuntimeError('database_or_image_export_failed:'+Path(destination).name)
 
 
+def open_sqlite_source(p, scratch):
+    """Открыть SQLite только для чтения и снять снимок через backup API.
+
+    У базы в режиме WAL в URI mode=ro нет доступа к -shm, и если писатель её сейчас не держит,
+    SQLite отвечает «unable to open database file» — живая БД выглядит сломанной.
+    Тогда копируем db и -wal во временный каталог и читаем копию."""
+    try:
+        return sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30), None
+    except sqlite3.Error as exc:
+        first = exc
+    scratch.mkdir(mode=0o700, exist_ok=True)
+    copy = Path(scratch)/(p.name+'.copy')
+    for suffix in ('', '-wal', '-shm'):
+        source = Path(str(p)+suffix)
+        try:
+            if source.exists():
+                Path(str(copy)+suffix).write_bytes(source.read_bytes())
+        except OSError:
+            pass              # -shm может исчезнуть в любой момент; копия db+wal достаточна
+    try:
+        return sqlite3.connect(copy, timeout=30), 'file_copy_wal'
+    except sqlite3.Error:
+        raise RuntimeError('sqlite_open_failed:'+str(p)) from first
+
+
 def export(config):
     os.nice(15)
     roots = [Path(x) for x in config['roots']]
@@ -58,7 +83,9 @@ def export(config):
                         unreadable.append(str(p)); continue
                     target = db/(hashlib.sha256(str(p).encode()).hexdigest()[:16]+'.sqlite')
                     try:
-                        source = sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30)
+                        source, method = open_sqlite_source(p, base/'walsrc')
+                        if source is None:
+                            raise RuntimeError('sqlite_open_failed:'+str(p))
                         output = sqlite3.connect(target)
                         try:
                             source.backup(output)
@@ -72,7 +99,11 @@ def export(config):
                         raise RuntimeError('sqlite_open_failed:'+str(p)) from e
                     excluded.extend([str(p).lstrip('/'),str(p).lstrip('/')+'-wal',str(p).lstrip('/')+'-shm',str(p).lstrip('/')+'-journal'])
                     metadata=p.stat()
-                    verified.append({'kind':'sqlite','source':str(p),'dump':str(target.relative_to(stage)),'integrity':'passed','uid':metadata.st_uid,'gid':metadata.st_gid,'mode':metadata.st_mode & 0o777})
+                    record={'kind':'sqlite','source':str(p),'dump':str(target.relative_to(stage)),'integrity':'passed','uid':metadata.st_uid,'gid':metadata.st_gid,'mode':metadata.st_mode & 0o777}
+                    if method:
+                        record['snapshot_method'] = method
+                        record['limitation'] = 'WAL-база скопирована файлом (db+wal) во временный каталог, затем backup API'
+                    verified.append(record)
         for container in config.get('postgres', []):
             state=json.loads(subprocess.check_output(['docker','inspect',container],stderr=subprocess.DEVNULL,timeout=15))[0]
             if not state['State']['Running']:
