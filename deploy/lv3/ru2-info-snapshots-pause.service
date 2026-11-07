@@ -1,5 +1,5 @@
 [Unit]
-Description=Pause Info snapshot synchronization after one failed run
+Description=Count failed Info snapshot syncs; pause timer after 5 in a row
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/systemctl stop ru2-info-snapshots.timer
+ExecStart=/usr/local/sbin/ru2-info-snapshots-onfail.sh

@@ -5,6 +5,7 @@ OnFailure=ru2-info-snapshots-pause.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker exec -u 0 -w /var/www/html amnezia-panel-web php /var/www/html/var/operations/ru2-info-migration/sync-snapshots.php
+ExecStartPost=/bin/sh -c "echo 0 > /var/lib/ru2-info-snapshots/failures"
 TimeoutStartSec=95
 Nice=10
 UMask=0077
