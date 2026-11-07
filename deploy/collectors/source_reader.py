@@ -173,9 +173,9 @@ def build_flux(snapshot, ops, previous=None):
     for key in ['today','total']:
         value = vis.get(key)
         add('visitors_'+key,'Уникальные IP '+key,value,'approx IP',
-            ('UTC day '+str(ops.get('visitor_day_utc'))) if key=='today' else 'since recovered Redis reset',
+            ('UTC day '+str(ops.get('visitor_day_utc'))) if key=='today' else 'с запуска Redis '+str(ops.get('visitor_counter_since') or '?'),
             'redis PFCOUNT '+('visitors:day:'+str(ops.get('visitor_day_utc')) if key=='today' else 'visitors:total'),error=None if value is not None else 'HLL key absent/unavailable',
-            hint='HLL; не люди/сессии. GET stats/visitors не вызывать: он пишет PFADD')
+            hint='HLL; не люди/сессии. Redis Flux без сохранения: счётчики обнуляются при перезапуске контейнера. GET stats/visitors не вызывать: он пишет PFADD')
     retain_missing_objects(doc,previous)
     return finish(doc,previous)
 

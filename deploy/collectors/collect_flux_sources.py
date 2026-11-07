@@ -41,10 +41,14 @@ def read_flux_sources():
                  '{"name":{{json .Names}},"state":{{json .State}},"status":{{json .Status}}}'])
         result['ops']['containers']=[json.loads(line) for line in raw.splitlines()]
     except Exception as exc:result['ops']['containers_error']=type(exc).__name__
+    # Redis Flux без сохранения на диск: после перезапуска контейнера HLL-ключей нет, пока не придёт первый посетитель.
+    # Отсутствующий ключ при доступном Redis = 0 посетителей с момента старта Redis, а не «нет данных».
+    try:result['ops']['visitor_counter_since']=cmd(['docker','inspect','-f','{{.State.StartedAt}}','flux-recovery-redis-1']).strip()[:19]+'Z'
+    except Exception as exc:result['ops']['visitor_since_error']=type(exc).__name__
     for name,key in [('total','visitors:total'),('today','visitors:day:'+date)]:
         try:
             exists=int(cmd(['docker','exec','flux-recovery-redis-1','redis-cli','EXISTS',key]))
-            result['ops']['visitor_pfcount'][name]=int(cmd(['docker','exec','flux-recovery-redis-1','redis-cli','PFCOUNT',key])) if exists else None
+            result['ops']['visitor_pfcount'][name]=int(cmd(['docker','exec','flux-recovery-redis-1','redis-cli','PFCOUNT',key])) if exists else 0
         except Exception as exc:result['ops']['visitor_'+name+'_error']=type(exc).__name__
     try:result['otpuska_document']=json.loads(Path('/var/lib/infodash/projects/otpuska.json').read_text())
     except Exception as exc:result['otpuska_error']=type(exc).__name__
