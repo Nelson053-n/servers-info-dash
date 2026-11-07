@@ -18,7 +18,7 @@
 
 На источниках отдельный ключ разрешает только `export-projects-v1`; обычный shell, TTY и forwarding запрещены. Для удалённых источников root helper читает только фиксированный конфиг. На рабочей VM экспорт выполняется с правами nel. Административные SSH-ключи в таймер не копируются.
 
-VM310: `/opt/info-backup/collect-projects.py`, конфиг `/opt/info-backup/project-sources.json`, service `projects-backup.service`, timer `projects-backup.timer` (план: ежедневно 15:30 UTC / 01:30 Владивосток; включается только после проверки первого полного прохода).
+VM310: `/opt/info-backup/collect-projects.py`, конфиг `/opt/info-backup/project-sources.json`, service `projects-backup.service`, timer `projects-backup.timer` (ежедневно 20:00 UTC / 06:00 Владивосток — с 08.11.2026 перенесён с 01:30, чтобы экспорт не поднимал CPU RU3 выше 85%); включается только после проверки первого полного прохода).
 
 Зашифрованный Restic repository: `/srv/restic/info-auto/projects`, доступ через существующий append-only REST на localhost. Пароль в `/var/lib/info-backup/projects/repository-password`; recovery copy на Giga host `/var/lib/projects-backup-recovery/repository-password`. Секреты не выводить. Проверять владельца и 0600. Файлы приложения и Docker inspect содержат секреты: они являются приватным payload, не telemetry.
 
