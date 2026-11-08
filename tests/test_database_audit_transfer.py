@@ -13,6 +13,7 @@ m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 def test_audit_transfer_checks_full_payload_sha(tmp_path,monkeypatch,capsys,corrupt):
     tmp_path.chmod(0o700);payload=b'private SQL audit payload'
     def guest(code):
+        assert '/srv/restic/projects-staging/lv3-db-restore-audit.tar.gz' in code
         if "'sha256'" in code:return json.dumps({'size':len(payload),'sha256':hashlib.sha256(payload).hexdigest()})
         data=b'X'+payload[1:] if corrupt else payload
         return base64.b64encode(data).decode()

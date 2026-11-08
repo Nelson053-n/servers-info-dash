@@ -27,7 +27,8 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('source',choices=['ru3','lv3','vm300-code']);parser.add_argument('--into',required=True,type=Path);a=parser.parse_args()
     os.umask(0o077)
     folder=a.into.resolve();st=folder.stat();assert folder.is_dir() and st.st_uid==os.getuid() and st.st_mode & 0o077==0
-    source='/var/lib/info-backup/projects/staging/'+a.source+'-db-restore-audit.tar.gz'
+    # QGA is outside the collector's private BindPaths mount namespace.
+    source='/srv/restic/projects-staging/'+a.source+'-db-restore-audit.tar.gz'
     meta=json.loads(guest("from pathlib import Path\nimport hashlib,json\np=Path("+repr(source)+")\nh=hashlib.sha256()\nwith p.open('rb') as f:\n for b in iter(lambda:f.read(2**20),b''):h.update(b)\nprint(json.dumps({'size':p.stat().st_size,'sha256':h.hexdigest()}))"))
     assert 0<meta['size']<2**31
     dest=folder/(a.source+'-db-restore-audit.tar.gz');assert dest.parent==folder
