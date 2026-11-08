@@ -144,26 +144,12 @@ def test_wal_database_without_shm_is_snapshotted_via_file_copy(tmp_path):
     check=sqlite3.connect(restored);assert check.execute('SELECT id FROM t').fetchall()==[(7,)];check.close()
 
 
-def test_missing_docker_skips_container_parts_instead_of_failing(tmp_path, monkeypatch):
-    """В образе выгрузки docker CLI не запускается (glibc). Копия не должна падать:
-    файлы и SQLite сохраняются, Docker-часть уходит в manifest.skipped с ограничением."""
-    import json
-    source=tmp_path/'project';source.mkdir();(source/'code.py').write_text('print(1)')
-    db=sqlite3.connect(source/'app.db');db.execute('CREATE TABLE t(x)');db.execute('INSERT INTO t VALUES(1)');db.commit();db.close()
-    (tmp_path/'.cache').mkdir(exist_ok=True)
-    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'.cache'/'stage')
-    monkeypatch.setattr(m,'docker_available',lambda: False)
-    archive=tmp_path/'result.tar'
-    with archive.open('wb') as stream:
-        monkeypatch.setattr(m.sys,'stdout',SimpleNamespace(buffer=stream))
-        m.export(dict(roots=[str(source)],source='test',projects=['test'],postgres=['pg-int'],mysql=[{'container':'c','dumper':'mysqldump'}],redis=['r'],native_postgres={'socket':'/var/run/postgresql'},image_containers=['pg-int']))
-    with tarfile.open(archive) as tar:
-        manifest=json.load(tar.extractfile('./manifest.json'))
-        kinds={x['kind'] for x in manifest['skipped']}
-        assert kinds=={'postgres_container','mysql','redis','native_postgres','containers_metadata'}
-        assert any('Docker' in x for x in manifest['limitations'])
-        assert any(x['kind']=='sqlite' and x['integrity']=='passed' for x in manifest['databases'])
-        assert any(x.endswith('/code.py') for x in tar.getnames())
+def test_missing_docker_fails_required_database_backup(tmp_path, monkeypatch):
+    source=tmp_path/'project';source.mkdir()
+    monkeypatch.setattr(m,'EXPORT_ROOT',tmp_path/'stage')
+    monkeypatch.setattr(m,'docker_available',lambda:False)
+    with pytest.raises(RuntimeError, match='required_docker_unavailable'):
+        m.export(dict(roots=[str(source)],source='test',projects=['test'],mysql=[{'container':'db'}]))
 
 
 def test_docker_available_is_false_when_cli_broken(monkeypatch):

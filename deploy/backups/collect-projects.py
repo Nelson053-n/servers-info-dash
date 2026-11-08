@@ -32,6 +32,19 @@ def restic(args,env):
     return p.stdout
 
 
+def validate_database_coverage(manifest):
+    if manifest.get('skipped'):
+        raise RuntimeError('required_database_coverage_missing')
+    required = {
+        'ru3': {('mysql','globalauto-db-1','globalauto'),('postgres','nana-wake-recovery-db','nanabanana'),('postgres','nana-wake-recovery-db','wakeparty'),('postgres','flux-recovery-db-1','fluxscope'),('redis','nana-recovery-redis-1',None),('redis','flux-recovery-redis-1',None)},
+        'lv3': {('mysql','amnezia-panel-db','amnezia_panel')},
+        'vm300-code': {('mysql','004a973abee7_amnezia-panel-db','amnezia_panel'),('postgres','native','wakeparty'),('postgres','fluxscope_pg','fluxscope'),('redis','fluxscope_redis',None)},
+    }.get(manifest.get('source'), set())
+    actual = {(x.get('kind'),x.get('container'),x.get('database')) for x in manifest['databases'] if x.get('dump')}
+    if not required <= actual:
+        raise RuntimeError('required_database_coverage_missing')
+
+
 def verify_archive(path,folder):
     with tarfile.open(path,'r:') as tar:
         members=[m for m in tar if m.name=='./manifest.json']
@@ -39,6 +52,12 @@ def verify_archive(path,folder):
         m=members[0]
         if m.size>2**20:raise RuntimeError('manifest_size_invalid')
         manifest=json.load(tar.extractfile(m))
+        validate_database_coverage(manifest)
+        for db in manifest['databases']:
+            if db.get('dump'):
+                member=tar.getmember('./'+db['dump'])
+                if not member.isfile() or member.size == 0:
+                    raise RuntimeError('database_dump_empty')
         for i,db in enumerate(manifest['databases']):
             if db['kind']!='sqlite':continue
             member=tar.getmember('./'+db['dump'])
@@ -102,7 +121,8 @@ def main():
             proof=receipts/(name+'.json');temporary=proof.with_suffix('.tmp');temporary.write_text(json.dumps({'source':name,'snapshot_id':summary['snapshot_id'],'archive_sha256':expected,'verified_at':row['last_restore_verified_at'],'manifest':manifest}));os.replace(temporary,proof)
         except Exception as exc:
             all_ok=False;row.update(error_code=str(exc) if str(exc) in {'export_failed','storage_space_low','source_scope_mismatch','repository_operation_failed','archive_restore_mismatch','sqlite_restore_failed'} else 'verification_failed')
-            if row['result']=='success':row['restore_result']='failed'
+            row['result']='failed'
+            row['restore_result']='failed'
         finally:
             archive.unlink(missing_ok=True)
             if restore.exists():shutil.rmtree(restore)

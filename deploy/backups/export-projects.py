@@ -42,18 +42,39 @@ def tool_available(name):
     return shutil.which(name) is not None
 
 
-def copy_wal_files(p, scratch):
-    """Копия db + -wal (+ -shm) во временный каталог: WAL-базу в режиме только-чтения
-    backup API прочитать не может (нужен -shm), а копию — может."""
-    scratch.mkdir(mode=0o700, exist_ok=True)
-    copy = Path(scratch)/(p.name+'.copy')
-    for suffix in ('', '-wal', '-shm'):
-        source = Path(str(p)+suffix)
+def sqlite_file_state(p):
+    """Metadata for the whole copy window; never hide permission or I/O errors."""
+    result = []
+    for suffix in ('', '-wal'):
         try:
-            if source.exists():
-                Path(str(copy)+suffix).write_bytes(source.read_bytes())
-        except OSError:
-            pass              # -shm может исчезнуть в любой момент; копия db+wal достаточна
+            s = Path(str(p)+suffix).stat()
+        except FileNotFoundError:
+            if not suffix:
+                raise
+            result.append(None)
+        else:
+            result.append((s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns))
+    return tuple(result)
+
+
+def copy_wal_files(p, scratch):
+    """Fail-closed stable-window fallback, not an atomic filesystem snapshot.
+
+    The caller supplies a unique empty private directory. A changing database is
+    rejected; all main-file/WAL read errors propagate. SHM is regenerated locally.
+    """
+    scratch.mkdir(mode=0o700, exist_ok=True)
+    before = sqlite_file_state(p)
+    copy = Path(scratch)/(p.name+'.copy')
+    if copy.exists() or Path(str(copy)+'-wal').exists():
+        raise RuntimeError('sqlite_scratch_not_empty')
+    for index, suffix in enumerate(('', '-wal')):
+        if before[index] is not None:
+            # Unlike read_bytes, streaming does not load large live DBs into RAM.
+            with Path(str(p)+suffix).open('rb') as source, Path(str(copy)+suffix).open('xb') as target:
+                shutil.copyfileobj(source, target, length=2**20)
+    if before != sqlite_file_state(p):
+        raise RuntimeError('sqlite_changed_during_copy')
     return copy
 
 
@@ -64,30 +85,35 @@ def snapshot_sqlite(p, target, scratch):
     2) если так не вышло (частый случай: WAL без -shm, writer не держит базу) — повторяем
        на копии файлов db+wal во временном каталоге.
     Ошибка в обоих случаях — исключение с путём к файлу."""
-    attempts = [
-        (None, lambda: sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30)),
-        ('file_copy_wal', lambda: sqlite3.connect(copy_wal_files(p, scratch), timeout=30)),
-    ]
     errors = []
-    for method, opener in attempts:
+    scratch.mkdir(mode=0o700, exist_ok=True)
+    # First use SQLite's own consistent backup. If a read-only WAL mount cannot
+    # provide SHM, allow at most three stable-window copies in unique directories.
+    for attempt in range(4):
+        source = output = None
+        copied = None
+        method = None if attempt == 0 else 'file_copy_wal'
         try:
-            source = opener()
-        except sqlite3.Error as exc:
-            errors.append(exc); continue
-        output = None
-        try:
+            if method is None:
+                source = sqlite3.connect(p.as_uri()+'?mode=ro', uri=True, timeout=30)
+            else:
+                copied = tempfile.TemporaryDirectory(prefix='sqlite-', dir=scratch)
+                copy = copy_wal_files(p, Path(copied.name))
+                # mode=rw refuses to create an empty DB if the copy is missing.
+                source = sqlite3.connect(copy.as_uri()+'?mode=rw', uri=True, timeout=30)
             output = sqlite3.connect(target)
             source.backup(output)
             if output.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
                 raise RuntimeError('sqlite_integrity_failed:'+str(p))
             return method
-        except (sqlite3.Error, RuntimeError) as exc:
+        except (sqlite3.Error, RuntimeError, OSError) as exc:
             errors.append(exc)
-            target.unlink(missing_ok=True)
         finally:
             if output is not None: output.close()
-            source.close()
-    raise RuntimeError('sqlite_snapshot_failed:'+str(p)) from (errors[0] if errors else None)
+            if source is not None: source.close()
+            if copied is not None: copied.cleanup()
+        target.unlink(missing_ok=True)
+    raise RuntimeError('sqlite_snapshot_failed:'+str(p)) from (errors[-1] if errors else None)
 
 
 def export(config):
@@ -103,6 +129,8 @@ def export(config):
         stage = Path(name);db = stage/'databases';db.mkdir(mode=0o700)
         excluded = [];verified = [];unreadable = [];skipped = []
         docker_ok = docker_available()
+        if not docker_ok and any(config.get(k) for k in ('postgres','mysql','redis','native_postgres','image_containers','images')):
+            raise RuntimeError('required_docker_unavailable')
         # SQLite's backup API captures committed WAL data without stopping the application.
         for root in roots:
             for folder, dirs, files in os.walk(root, followlinks=False):
@@ -168,7 +196,7 @@ def export(config):
                 verified.append({'kind':'postgres','container':container,'database':database,'dump':str(target.relative_to(stage)),'catalog':'passed'})
             run(['docker','exec',container,'sh','-c','exec pg_dumpall -U "$POSTGRES_USER" --roles-only'],db/(container+'-roles.sql'))
         native=config.get('native_postgres')
-        if native and (not docker_ok or not tool_available('pg_dump')):
+        if native and not docker_ok:
             skipped.append({'kind':'native_postgres','reason':'pg_dump_unavailable'})
         elif native:
             client=['docker','run','--rm','--network','none','--user',str(native['uid']),'--mount','type=bind,src='+native['socket']+',dst='+native['socket']+',readonly',native['image']]
@@ -184,7 +212,7 @@ def export(config):
                 verified.append({'kind':'postgres','container':'native','database':database,'dump':str(target.relative_to(stage)),'catalog':'passed'})
             run(client+['pg_dumpall']+auth+['--roles-only'],db/'native-postgres-roles.sql')
         for entry in config.get('mysql', []):
-            if not docker_ok or not tool_available(entry.get('dumper','mysqldump')):
+            if not docker_ok:
                 skipped.append({'kind':'mysql','container':entry.get('container'),'reason':'mysql_client_unavailable'})
                 continue
             container=entry['container'];client=entry['client'];dumper=entry['dumper']
