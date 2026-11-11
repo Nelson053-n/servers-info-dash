@@ -5,9 +5,9 @@ import json
 import subprocess
 
 UTC=dt.timezone.utc
-SOURCES={'ru2':{'info-public':'Info (публичный)','bonds':'BondAI'},'ru3':{'nanabanana':'Бананоген','wakeparty':'Wakeparty','flux':'FluxRadar','globalauto':'GlobalAuto','cars':'Машины','kendo':'KendoSolki','trade':'Трейдинг'},'lv3':{'vpn':'OneYearSolution'},'vm300-code':{'local-project-code':'Рабочие копии проектов'},'kuma-host':{'kuma':'Uptime Kuma'}}
+SOURCES={'ru2':{'info-public':'Info (публичный)','bonds':'BondAI'},'ru3':{'nanabanana':'Бананоген','wakeparty':'Wakeparty','flux':'FluxRadar','globalauto':'GlobalAuto','cars':'Машины','kendo':'KendoSolki','trade':'Трейдинг'},'lv3':{'vpn':'OneYearSolution'},'vm300-code':{'local-project-code':'Рабочие копии проектов'},'kuma-host':{'kuma':'Uptime Kuma'},'bob':{'otpuska':'График отпусков (стенд)','moodle':'Учебный отдел (Moodle)'}}
 MISSING={}
-DEFERRED={'otpuska':'График отпусков'}
+DEFERRED={}
 FIELDS={'result','restore_result','error_code','last_backup_success_at','last_restore_verified_at','logical_bytes','protected_projects','database_restore_result','database_restore_verified_at'}
 ERRORS={None,'export_failed','storage_space_low','source_scope_mismatch','repository_operation_failed','archive_restore_mismatch','sqlite_restore_failed','verification_failed'}
 
@@ -73,8 +73,8 @@ def analytics(d,now):
             protected=healthy and id in r.get('protected_projects',[])
             if protected:good+=1
             text='Копия проверена' if protected and r.get('restore_result')=='passed' else 'Копия есть; проверка не завершена' if protected else 'Ошибка копирования' if r.get('result')=='failed' else 'Нет свежей копии'
-            rows.append(dict(project=name,status=text,last_backup=display_date(r.get('last_backup_success_at')),last_restore=display_date(r.get('last_restore_verified_at')),database_restore=(display_date(r.get('database_restore_verified_at')) if r.get('database_restore_result')=='passed' else 'Не подтверждён') if source in {'ru3','lv3'} else 'SQLite: проверена' if r.get('restore_result')=='passed' else 'Не подтверждён',scope={'info-public':'Код, настройки, доступы и образ','bonds':'Код, SQLite и образ','nanabanana':'Код, загрузки, PostgreSQL, Redis, образы','wakeparty':'Код, PostgreSQL и образ','flux':'Сайт, API, PostgreSQL и Redis','globalauto':'WordPress, загрузки и MariaDB','cars':'Приложение, файлы данных и образ','kendo':'Файлы восстановленного статического сайта','trade':'Код, настройки и состояния sandbox','vpn':'Панель, MySQL и сохранённые конфигурации нод','kuma':'SQLite, настройки и образ'}.get(id,'Текущее состояние'),size=size_text(r.get('logical_bytes'))))
-            label={'ru2':'Публичный Info и BondAI','ru3':'Проекты на RU3','lv3':'OneYearSolution','kuma-host':'Uptime Kuma'}.get(source,source)
+            rows.append(dict(project=name,status=text,last_backup=display_date(r.get('last_backup_success_at')),last_restore=display_date(r.get('last_restore_verified_at')),database_restore=(display_date(r.get('database_restore_verified_at')) if r.get('database_restore_result')=='passed' else 'Не подтверждён') if source in {'ru3','lv3','bob'} else 'SQLite: проверена' if r.get('restore_result')=='passed' else 'Не подтверждён',scope={'info-public':'Код, настройки, доступы и образ','bonds':'Код, SQLite и образ','nanabanana':'Код, загрузки, PostgreSQL, Redis, образы','wakeparty':'Код, PostgreSQL и образ','flux':'Сайт, API, PostgreSQL и Redis','globalauto':'WordPress, загрузки и MariaDB','cars':'Приложение, файлы данных и образ','kendo':'Файлы восстановленного статического сайта','trade':'Код, настройки и состояния sandbox','vpn':'Панель, MySQL и сохранённые конфигурации нод','kuma':'SQLite, настройки и образ','otpuska':'Код стенда, копии базы, PostgreSQL и Redis','moodle':'Код Moodle, moodledata, MariaDB и образы'}.get(id,'Текущее состояние'),size=size_text(r.get('logical_bytes'))))
+            label={'ru2':'Публичный Info и BondAI','ru3':'Проекты на RU3','lv3':'OneYearSolution','kuma-host':'Uptime Kuma','bob':'График отпусков на Bob'}.get(source,source)
             if not protected and (source,'copy') not in emitted:
                 emitted.add((source,'copy'));alerts.append(dict(severity='bad' if r.get('result')=='failed' else 'warn',text=label+': '+('ошибка копирования' if r.get('result')=='failed' else 'свежая копия подтверждена не для всех проектов')+'; охват указан в таблице'))
             elif protected and r.get('restore_result')!='passed' and (source,'restore') not in emitted:

@@ -13,7 +13,7 @@ def data():
 def test_incomplete_coverage_never_claims_all_projects():
     d=m.validate(data(),NOW);doc=m.analytics(d,NOW)
     assert doc['kpis'][0]['value']==2
-    assert doc['kpis'][1]['value']==11
+    assert doc['kpis'][1]['value']==13
     assert any(x['status']=='Нет свежей копии' for x in doc['tables'][0]['rows'])
     assert doc['status']=='partial'
     old=m.analytics(d,NOW+dt.timedelta(days=2))
@@ -41,11 +41,15 @@ def test_fresh_observation_cannot_refresh_old_backup_evidence():
     assert not doc['stale'] and doc['kpis'][0]['value']==0
     assert any(x['severity']=='warn' for x in doc['alerts'])
 
-def test_bob_is_explicitly_deferred_by_owner():
+def test_bob_is_a_covered_source_not_deferred():
     doc=m.analytics(data(),NOW)
-    row=next(x for x in doc['tables'][0]['rows'] if x['project']=='График отпусков')
-    assert row['status']=='Отложен владельцем' and 'SSH' in row['scope']
-    assert not any('График отпусков' in x['text'] for x in doc['alerts'])
+    row=next(x for x in doc['tables'][0]['rows'] if x['project']=='График отпусков (стенд)')
+    assert row['status']=='Нет свежей копии' and 'PostgreSQL' in row['scope']
+    assert not any(x['status']=='Отложен владельцем' for x in doc['tables'][0]['rows'])
+    d=data();d['sources']['bob']=dict(result='success',restore_result='passed',error_code=None,last_backup_success_at=NOW.isoformat(),last_restore_verified_at=NOW.isoformat(),logical_bytes=400*1024**2,protected_projects=['otpuska','moodle'])
+    fresh=m.analytics(m.validate(d,NOW),NOW)
+    assert next(x for x in fresh['tables'][0]['rows'] if x['project']=='График отпусков (стенд)')['status']=='Копия проверена'
+    assert next(x for x in fresh['tables'][0]['rows'] if x['project']=='Учебный отдел (Moodle)')['status']=='Копия проверена'
 
 
 def test_restore_failure_cannot_be_reported_as_healthy():

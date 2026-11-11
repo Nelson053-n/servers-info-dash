@@ -39,6 +39,7 @@ def validate_database_coverage(manifest):
         'ru3': {('mysql','globalauto-db-1','globalauto'),('postgres','nana-wake-recovery-db','nanabanana'),('postgres','nana-wake-recovery-db','wakeparty'),('postgres','flux-recovery-db-1','fluxscope'),('redis','nana-recovery-redis-1',None),('redis','flux-recovery-redis-1',None)},
         'lv3': {('mysql','amnezia-panel-db','amnezia_panel')},
         'vm300-code': {('mysql','004a973abee7_amnezia-panel-db','amnezia_panel'),('postgres','native','wakeparty'),('postgres','fluxscope_pg','fluxscope'),('redis','fluxscope_redis',None)},
+        'bob': {('postgres','otpusk-stand-db-1','otpusk'),('redis','otpusk-stand-redis-1',None),('mysql','csdtest-test-db-1','moodle')},
     }.get(manifest.get('source'), set())
     actual = {(x.get('kind'),x.get('container'),x.get('database')) for x in manifest['databases'] if x.get('dump')}
     if not required <= actual:

@@ -216,12 +216,17 @@ def export(config):
                 skipped.append({'kind':'mysql','container':entry.get('container'),'reason':'mysql_client_unavailable'})
                 continue
             container=entry['container'];client=entry['client'];dumper=entry['dumper']
-            setup=('export MYSQL_PWD="$(cat /run/secrets/db_root_password)"; ' if entry.get('secret_file') else 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; ')
-            names=subprocess.check_output(['docker','exec',container,'sh','-c',setup+'exec '+client+' -uroot -N -e "SHOW DATABASES"'],stderr=subprocess.DEVNULL,timeout=30).decode().splitlines()
+            user=entry.get('user','root')
+            secrets_file=entry.get('secret_path','/run/secrets/db_root_password')
+            setup=('export MYSQL_PWD="$(cat '+secrets_file+')"; ' if entry.get('secret_file') else 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; ')
+            if entry.get('database'):
+                names=[entry['database']]
+            else:
+                names=subprocess.check_output(['docker','exec',container,'sh','-c',setup+'exec '+client+' -u'+user+' -N -e "SHOW DATABASES"'],stderr=subprocess.DEVNULL,timeout=30).decode().splitlines()
             for database in names:
                 if database in ['information_schema','performance_schema','sys']:continue
                 target=db/(container+'-'+hashlib.sha256(database.encode()).hexdigest()[:12]+'.sql')
-                run(['docker','exec',container,'sh','-c',setup+'exec '+dumper+' -uroot --single-transaction --routines --events --databases "$1"','sh',database],target)
+                run(['docker','exec',container,'sh','-c',setup+'exec '+dumper+' -u'+user+' --single-transaction --routines --events --databases "$1"','sh',database],target)
                 verified.append({'kind':'mysql','container':container,'database':database,'dump':str(target.relative_to(stage)),'result':'completed'})
         for container in config.get('redis', []):
             if not docker_ok:
