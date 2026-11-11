@@ -295,10 +295,17 @@
   }
 
   /* ---------- общие блоки ---------- */
+  const certExpired = (e) => /certif/i.test(e || "") && /expired/i.test(e || "");
   function siteLine(p) {
     const parts = [];
-    if (p.check) parts.push(p.check.http == null ? "сайт не отвечает" : "HTTP " + p.check.http + " · " + nf(p.check.ms, 0) + " мс");
-    if (p.tls) parts.push(p.tls.error ? "TLS: ошибка" : "TLS " + p.tls.days_left + " дн");
+    const checkCert = !!(p.check && p.check.http == null && certExpired(p.check.error));
+    const tlsCert = !!(p.tls && certExpired(p.tls.error));
+    if (p.check) parts.push(p.check.http == null
+      ? (checkCert ? "сертификат истёк" : "сайт не отвечает")
+      : "HTTP " + p.check.http + " · " + nf(p.check.ms, 0) + " мс");
+    // обе проверки упрутся в один и тот же сертификат: не повторяем причину дважды
+    if (p.tls && !(tlsCert && checkCert)) parts.push(tlsCert ? "TLS: сертификат истёк"
+      : p.tls.error ? "TLS: ошибка" : "TLS " + p.tls.days_left + " дн");
     return parts.join(" · ");
   }
   /* Возраст сводки проекта: «данные 4 мин» (или «устарели 3 ч» — тогда предупреждение). */
