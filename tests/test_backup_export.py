@@ -118,7 +118,10 @@ def test_tar_changed_only_accepts_only_live_file_change_warning():
     assert not m.tar_changed_only(2, ok)
     assert not m.tar_changed_only(1, b"")
     assert not m.tar_changed_only(1, ok+b"tar: opt/x: Cannot open: Permission denied\n")
-    assert not m.tar_changed_only(1, b"tar: opt/x: file changed as we read it\ntar: Exiting with failure status due to previous errors\n")
+    # GNU tar 1.35 appends this trailer to any non-zero exit; it must not turn a benign race into a failure.
+    trailer=b"tar: opt/x: file changed as we read it\ntar: Exiting with failure status due to previous errors\n"
+    assert m.tar_changed_only(1, trailer)
+    assert not m.tar_changed_only(1, trailer+b"tar: opt/y: Cannot open: Permission denied\n")
 
 def test_wal_database_without_shm_is_snapshotted_via_file_copy(tmp_path):
     """Живая WAL-база в режиме только-чтения не читается backup API, пока писатель не держит -shm.

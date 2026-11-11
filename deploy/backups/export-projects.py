@@ -314,11 +314,17 @@ def export(config):
         original_paths=set()
         excluded_absolute=['/'+x for x in excluded]
         for root in roots:original_paths.update(selected_paths(root,excluded_absolute))
+        # A live service may delete its own temporary files between listing and archiving.
+        # Drop paths that are already gone, record them, and keep everything still present.
+        vanished=sorted(str(p) for p in original_paths if not os.path.lexists(p))
+        if vanished:original_paths={p for p in original_paths if os.path.lexists(p)}
         manifest={'schema_version':2,'source':config['source'],'projects':config['projects'],'observed_at':dt.datetime.now(dt.timezone.utc).isoformat(),'databases':verified,'directory_snapshots':directory_snapshots,'roots':[str(p) for p in roots],
                   'unreadable_skipped':sorted(set(unreadable))[:500],
+                  'vanished_skipped':[x for x in vanished if not os.path.lexists(x)][:500],
                   'skipped':skipped,
                   'limitations':['File copies are live; databases use logical dumps/SQLite backup API. PostgreSQL restore catalog check is not an actual database restore.',
-                                 'Files changed while being read are archived as read (tar "file changed as we read it" is accepted).']
+                                 'Files changed while being read are archived as read (tar "file changed as we read it" is accepted).',
+                                 'Transient files deleted by the running service before being read are listed in vanished_skipped and are not in the archive.']
                   + (['Docker-контейнеры, их базы и образы не снимались: docker/клиенты БД недоступны в образе выгрузки. Файлы и SQLite сохранены.'] if skipped else [])}
         (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
         source_list=stage/'source-paths.list';stage_list=stage/'stage-paths.list'
@@ -333,12 +339,30 @@ def export(config):
 
 
 def tar_changed_only(returncode, stderr):
-    """GNU tar выходит с кодом 1, если живой файл изменился во время чтения (WordPress uploads, логи).
-    Архив при этом полный; принимаем только такой случай — любое другое сообщение или код = ошибка."""
-    if returncode != 1:
+    """Принимаем только два безопасных гонки: живой файл изменился во время чтения (код 1)
+    и файл исчез между листингом и чтением (код 2, «Cannot stat»). Любое другое сообщение
+    или код — ошибка: нельзя принять архив, в котором потеряно существующее."""
+    if returncode not in (1, 2):
         return False
-    lines = [line for line in stderr.decode('utf-8', 'replace').splitlines() if line.strip()]
-    return bool(lines) and all(line.startswith('tar: ') and line.endswith(': file changed as we read it') for line in lines)
+    suffix_missing = ': Cannot stat: No such file or directory'
+    lines = [line for line in stderr.decode('utf-8', 'replace').splitlines()
+             if line.strip() and not line.startswith('tar: Exiting with failure status')]
+    if not lines:
+        return False
+    vanished = 0
+    for line in lines:
+        if not line.startswith('tar: '):
+            return False
+        if line.endswith(': file changed as we read it'):
+            continue
+        if not line.endswith(suffix_missing):
+            return False
+        path = line[len('tar: '):-len(suffix_missing)]
+        if os.path.lexists('/' + path):
+            return False          # файл на месте — значит потеря данных, а не гонка
+        vanished += 1
+    # Код 2 означает фатальную ошибку: он допустим только когда реально исчез файл.
+    return returncode == 1 or vanished > 0
 
 
 if __name__ == '__main__':
