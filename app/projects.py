@@ -434,6 +434,12 @@ def _separate_coverage_limits(doc: dict[str, Any] | None) -> None:
     doc["limitations"] = limits
 
 
+def _cert_expired(error: str | None) -> bool:
+    """Просроченный сертификат — отдельная причина: сайт отвечает, но браузер его блокирует."""
+    text = (error or '').lower()
+    return 'certif' in text and 'expired' in text
+
+
 def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     """ok / warn / bad и замечания [{severity, text}]: сайт, сертификат и alerts самого проекта."""
     bad: list[str] = []
@@ -443,7 +449,10 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
         if chk.get("valid") is False:
             bad.append("Kuma API: HTTP/JSON check failed")
         elif chk["http"] is None or chk["http"] >= 500:
-            bad.append("сайт не отвечает" if chk["http"] is None else f"сайт отвечает {chk['http']}")
+            if chk["http"] is None and _cert_expired(chk.get("error")):
+                bad.append("сертификат истёк — браузеры блокируют сайт")
+            else:
+                bad.append("сайт не отвечает" if chk["http"] is None else f"сайт отвечает {chk['http']}")
         elif chk["http"] >= 400:
             warn.append(f"сайт отвечает {chk['http']}")
         elif chk["ms"] > _SLOW_MS and chk.get("slow_streak", _SLOW_STREAK) >= _SLOW_STREAK:
@@ -453,7 +462,9 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     if tls:
         if tls["error"]:
             # один неудачный TLS-handshake — обычно сетевой сбой; «срочно» — только если повторился
-            if tls.get("fail_streak", 2) >= 2:
+            if _cert_expired(tls.get("error")) and tls.get("fail_streak", 2) >= 2:
+                bad.append("сертификат истёк — браузеры блокируют сайт")
+            elif tls.get("fail_streak", 2) >= 2:
                 bad.append("сертификат не проверяется")
             else:
                 warn.append("сертификат не проверился (разовый сбой — повтор в следующем цикле)")
@@ -478,7 +489,10 @@ def _state_of(project: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
         text = str(a.get("text", ""))[:200]
         (bad if a.get("severity") == "bad" else warn).append(text)
     issues = [{"severity": "bad", "text": t} for t in bad] + [{"severity": "warn", "text": t} for t in warn]
-    return ("bad" if bad else "warn" if warn else "ok"), issues
+    # Одна и та же причина приходит и от HTTP-проверки, и от TLS: показываем её один раз.
+    seen: set[str] = set()
+    unique = [i for i in issues if not (i["text"] in seen or seen.add(i["text"]))]
+    return ("bad" if bad else "warn" if warn else "ok"), unique
 
 
 _tls_fail_streak: dict[str, int] = {}
