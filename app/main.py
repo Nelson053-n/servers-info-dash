@@ -165,6 +165,7 @@ class MetricsCollector:
         servers = await asyncio.gather(*tasks)
         local = await self._collect_local()
         servers.insert(0, local)
+        apply_monitor_state(servers)
         return {
             "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "refresh_interval_sec": self.cfg.refresh_interval_sec,
@@ -193,6 +194,31 @@ class MetricsCollector:
         return ping_ms
 
     async def collect_server(self, server: ServerConfig) -> dict[str, Any]:
+        paused = MONITOR_PAUSED.get(server.name)
+        if paused is not None:
+            # Наблюдение выключено руками: не ходим на хост и не считаем это ошибкой.
+            last = self._last_good.get(server.name) or {}
+            row = {key: last.get(key) for key in (
+                "ping_ms", "cpu_percent", "ram_used_gb", "ram_total_gb",
+                "uptime_days", "rx_mbps", "tx_mbps", "disk_free_gb",
+                "disk_total_gb", "interface", "metrics_source", "aliases",
+                "panel_status",
+            )}
+            row.update(
+                name=server.name,
+                host=server.host,
+                country=server.country,
+                interface=server.interface,
+                status="paused",
+                error=None,
+                monitoring=False,
+                paused_since=paused.get("since"),
+                paused_note=paused.get("note"),
+                paused_metrics_at=(last.get("generated_at") or None),
+            )
+            self._error_counts[server.name] = 0
+            return row
+
         ping_ms = await self._get_ping(server)
 
         base = {
@@ -260,6 +286,14 @@ class MetricsCollector:
         self._error_counts[server.name] = 0
         self._last_good[server.name] = dict(base)
         return base
+
+    def reset_server_state(self, server_name: str) -> None:
+        """После паузы начинаем с чистого листа: без старых ошибок и «хороших» замеров."""
+        self._error_counts[server_name] = 0
+        self._last_good.pop(server_name, None)
+        self._previous.pop(server_name, None)
+        self._ping_cache.pop(server_name, None)
+        self._ping_last_time.pop(server_name, None)
 
     async def _collect_local(self) -> dict[str, Any]:
         """Collect metrics from the local host (dashboard server)."""
@@ -776,7 +810,68 @@ class MetricsCollector:
 
 
 CONFIG_PATH = Path("config/servers.yaml")
+MONITOR_STATE_PATH = Path("config/monitor_state.json")
 CONFIG_LOCK = Lock()
+# name -> {"since": iso, "note": str | None}; отсутствие имени = наблюдение включено
+MONITOR_PAUSED: dict[str, dict[str, Any]] = {}
+
+
+def load_monitor_state() -> dict[str, dict[str, Any]]:
+    """Кто снят с наблюдения. Битый файл не должен ломать запуск."""
+    try:
+        raw = json.loads(MONITOR_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    paused = raw.get("paused") if isinstance(raw, dict) else None
+    if not isinstance(paused, dict):
+        return {}
+    clean: dict[str, dict[str, Any]] = {}
+    for name, meta in paused.items():
+        if not isinstance(name, str) or not name or not isinstance(meta, dict):
+            continue
+        since = meta.get("since")
+        note = meta.get("note")
+        clean[name] = {
+            "since": since if isinstance(since, str) else None,
+            "note": note if isinstance(note, str) else None,
+        }
+    return clean
+
+
+def save_monitor_state(paused: dict[str, dict[str, Any]]) -> None:
+    """0600 и атомарная замена: состояние меняется кнопкой из интерфейса."""
+    MONITOR_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"paused": paused}, ensure_ascii=False, indent=2)
+    tmp_path = MONITOR_STATE_PATH.with_name(f".{MONITOR_STATE_PATH.name}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, MONITOR_STATE_PATH)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    MONITOR_STATE_PATH.chmod(0o600)
+
+
+def is_monitor_paused(server_name: str) -> bool:
+    return server_name in MONITOR_PAUSED
+
+
+def apply_monitor_state(servers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Пометить снятые с наблюдения строки — в том числе синтетические (панель, TCP)."""
+    for row in servers:
+        state = MONITOR_PAUSED.get(row.get("name"))
+        if state is None:
+            continue
+        row["status"] = "paused"
+        row["error"] = None
+        row["monitoring"] = False
+        row["paused_since"] = state.get("since")
+        row["paused_note"] = state.get("note")
+    return servers
 
 
 def load_config() -> AppConfig:
@@ -1152,6 +1247,8 @@ async def _bootstrap_monitor_user(
 
 
 cfg = load_config()
+MONITOR_PAUSED.update(load_monitor_state())
+
 collector = MetricsCollector(cfg)
 app = FastAPI(title="Server Info Dashboard")
 app.mount(
@@ -1882,6 +1979,8 @@ def _log_server_metrics(
     # would put rows from one UTC day into a file named for another.
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     for srv in servers:
+        if srv.get("status") == "paused":
+            continue
         safe = _safe_filename(srv.get("name", "unknown"))
         log_path = _LOGS_DIR / f"{safe}_{today}.csv"
         write_header = not log_path.exists()
@@ -2395,6 +2494,10 @@ async def _check_and_notify(
 
     for srv in servers:
         name = srv.get("name", "?")
+        if srv.get("status") == "paused":
+            # Снят с наблюдения: ни тревог, ни «восстановлений».
+            _trigger_counts.pop(name, None)
+            continue
         counts = _trigger_counts.setdefault(name, {})
         triggered: set[str] = set()
         is_down = srv.get("status") == "down"
@@ -3405,6 +3508,91 @@ async def download_logs(server_name: str) -> StreamingResponse:
             ),
         },
     )
+
+
+class MonitorToggleRequest(BaseModel):
+    enabled: bool
+    note: str | None = Field(default=None, max_length=200)
+
+
+async def _refresh_server_now(server_name: str) -> None:
+    """Сразу обновить одну строку в кэше, не дожидаясь полного цикла."""
+    server = next((item for item in cfg.servers if item.name == server_name), None)
+    if server is None:
+        return
+    row = await collector.collect_server(server)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _attach_traffic_1d, [row])
+    await loop.run_in_executor(None, _attach_traffic_30d, [row])
+    async with _metrics_lock:
+        if isinstance(_cached_metrics, dict):
+            rows = _cached_metrics.get("servers")
+            if isinstance(rows, list):
+                for index, item in enumerate(rows):
+                    if item.get("name") == server_name:
+                        rows[index] = row
+                        break
+                else:
+                    rows.append(row)
+                _cached_metrics["generated_at"] = dt.datetime.now(
+                    dt.timezone.utc,
+                ).isoformat()
+
+
+@app.put("/api/servers/{server_name}/monitor")
+async def set_server_monitor(
+    server_name: str, payload: MonitorToggleRequest,
+) -> dict[str, Any]:
+    """Включить/выключить наблюдение за сервером одной кнопкой."""
+    name = server_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="server name is required")
+    # В конфиге могут быть только SSH-хосты: ноды панели и TCP-проверки живут
+    # в кэше метрик, поэтому смотрим ещё и туда.
+    known = {item.name for item in cfg.servers}
+    async with _metrics_lock:
+        known |= {
+            row.get("name")
+            for row in (_cached_metrics or {}).get("servers", [])
+            if isinstance(row, dict)
+        }
+    if name not in known:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    with CONFIG_LOCK:
+        if payload.enabled:
+            MONITOR_PAUSED.pop(name, None)
+        else:
+            MONITOR_PAUSED[name] = {
+                "since": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "note": (payload.note or "").strip() or None,
+            }
+        save_monitor_state(MONITOR_PAUSED)
+
+    if payload.enabled:
+        collector.reset_server_state(name)
+    await _refresh_server_now(name)
+    # Синтетические строки (панель, TCP) не пересобираются точечно: применяем
+    # состояние к кэшу сразу, а при включении просим полный цикл.
+    async with _metrics_lock:
+        rows = (_cached_metrics or {}).get("servers")
+        if isinstance(rows, list):
+            apply_monitor_state(rows)
+            _cached_metrics["generated_at"] = dt.datetime.now(
+                dt.timezone.utc,
+            ).isoformat()
+        snapshot = list(rows or [])
+    if payload.enabled and not any(item.name == name for item in cfg.servers):
+        asyncio.get_running_loop().create_task(_run_collector_cycle(0))
+    if snapshot:
+        await _check_and_notify(snapshot)
+
+    return {
+        "status": "ok",
+        "server": name,
+        "monitoring": bool(payload.enabled),
+        "paused_servers": sorted(MONITOR_PAUSED),
+    }
 
 
 @app.post("/api/servers")

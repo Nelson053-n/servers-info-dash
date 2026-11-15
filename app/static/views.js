@@ -480,6 +480,7 @@
     const items = [];
     (metrics && metrics.servers || []).forEach((s) => {
       const href = "#servers/" + encodeURIComponent(s.name);
+      if (s.status === "paused") return;
       if (s.status !== "up") {
         const exits = liveExitsVia(s.name);
         const via = s.metrics_source === "tcp-probe" ? "tcp" : /server_metrics/.test(s.metrics_source || "") ? "panel" : "ssh";
@@ -844,7 +845,8 @@
     const meta = el("div", "drawer-meta");
     if (s) {
       const viaPanel = /server_metrics/.test(s.metrics_source || "");
-      meta.append(chip(s.status === "up" ? "ok" : "bad", s.status === "up" ? "работает" : viaPanel ? "нет метрик из панели" : s.metrics_source === "tcp-probe" ? "не отвечает" : "нет связи по SSH"));
+      meta.append(chip(s.status === "paused" ? "ok" : s.status === "up" ? "ok" : "bad",
+        s.status === "paused" ? "наблюдение выключено" : s.status === "up" ? "работает" : viaPanel ? "нет метрик из панели" : s.metrics_source === "tcp-probe" ? "не отвечает" : "нет связи по SSH"));
       const facts = [];
       if (s.uptime_days != null) facts.push(`аптайм ${nf(s.uptime_days, 1)} дн`);
       const pg = s.ping_ms != null ? s.ping_ms : exitPing()[s.name];
@@ -1151,14 +1153,17 @@
     const servers = (metrics && metrics.servers) || [];
     if (!servers.length) return;
     box.className = "stats";
+    const paused = servers.filter((s) => s.status === "paused");
     const up = servers.filter((s) => s.status === "up");
-    const down = servers.filter((s) => s.status !== "up");
+    const down = servers.filter((s) => s.status !== "up" && s.status !== "paused");
     const maxCpu = up.reduce((a, s) => (s.cpu_percent || 0) > (a.cpu_percent || 0) ? s : a, up[0] || {});
     const maxDisk = up.reduce((a, s) => diskPct(s) > diskPct(a) ? s : a, up[0] || {});
     const traffic = servers.reduce((a, s) => a + (s.traffic_1d_gb || 0), 0);
     const topT = servers.reduce((a, s) => (s.traffic_1d_gb || 0) > (a.traffic_1d_gb || 0) ? s : a, servers[0]);
     box.append(
-      stat("На связи", String(up.length), {of: servers.length, state: down.length ? "bad" : "ok", note: down.length ? down.map((s) => s.name).join(", ") + " — нет ответа" : "все отвечают"}),
+      stat("На связи", String(up.length), {of: servers.length, state: down.length ? "bad" : "ok",
+        note: (down.length ? down.map((s) => s.name).join(", ") + " — нет ответа" : "все отвечают")
+          + (paused.length ? " · на паузе: " + paused.map((s) => s.name).join(", ") : "")}),
       stat("Макс. CPU", maxCpu.name ? Math.round(maxCpu.cpu_percent || 0) + " %" : "—", {state: (maxCpu.cpu_percent || 0) >= 80 ? "warn" : "ok", note: maxCpu.name || ""}),
       stat("Макс. диск", maxDisk.name ? diskPct(maxDisk) + " %" : "—", {state: diskPct(maxDisk) >= 85 ? "warn" : "ok", note: maxDisk.name ? maxDisk.name + " · свободно " + nf(maxDisk.disk_free_gb, 1) + " ГБ" : ""}),
       stat("Трафик за сутки", traffic >= 1000 ? nf(traffic / 1000, 2) + " ТБ" : Math.round(traffic) + " ГБ", {note: topT ? Math.round(topT.traffic_1d_gb || 0) + " ГБ — " + topT.name : ""}),
@@ -1192,7 +1197,7 @@
       const ct = $("cntTls"); ct.textContent = soon ? String(soon) : ""; ct.className = "cnt" + (soon ? " warn" : "");
     }
     const servers = (metrics && metrics.servers) || [];
-    const down = servers.filter((s) => s.status !== "up").length;
+    const down = servers.filter((s) => s.status !== "up" && s.status !== "paused").length;
     const cs = $("cntServers"); cs.textContent = down ? String(down) : servers.length ? String(servers.length) : ""; cs.className = "cnt" + (down ? " bad" : "");
     const st = $("railStatus");
     if (metrics && metrics.generated_at) {

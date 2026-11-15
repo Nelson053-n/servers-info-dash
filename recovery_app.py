@@ -11,12 +11,18 @@ hidden_nodes = {'Финляндия 2', 'Швеция', 'Нидерланды'}
 original_fetch_analytics = main.projects_tab.fetch_analytics
 
 
+def _paused_names():
+    """Состояние читаем на каждом цикле: кнопка меняет его в том же процессе."""
+    return set(getattr(main, 'MONITOR_PAUSED', {}) or {})
+
+
 def fetch_visible_analytics(source):
     document = original_fetch_analytics(source)
     if source.url and 'panel.oneyearsolution.com' in source.url:
+        excluded = hidden_nodes | _paused_names()
         for table in document.get('tables', []):
             if table.get('id') == 'servers':
-                table['rows'] = [row for row in table.get('rows', []) if row.get('name') not in hidden_nodes]
+                table['rows'] = [row for row in table.get('rows', []) if row.get('name') not in excluded]
                 for kpi in document.get('kpis', []):
                     if kpi.get('id') == 'nodes' and isinstance(kpi.get('value'), str):
                         active = kpi['value'].split('/')[0].strip()
@@ -26,7 +32,7 @@ def fetch_visible_analytics(source):
             text = alert.get('text', '')
             if text.startswith(('ТСПУ блокирует (cheburcheck): ', 'VPN с РФ заблокирован (флаг): ', 'Ноды офлайн: ')):
                 prefix, names = text.split(': ', 1)
-                visible = [name for name in names.split(', ') if name not in hidden_nodes]
+                visible = [name for name in names.split(', ') if name not in excluded]
                 if not visible:
                     continue
                 alert = {**alert, 'text': prefix + ': ' + ', '.join(visible)}
@@ -145,6 +151,7 @@ async def collect_with_panel():
         data['servers'].append(entry)
         if row.get('host'):
             by_host[row['host']] = entry
+    data['servers'] = main.apply_monitor_state(data['servers'])
     data['panel_bridge_error'] = source_error
     ports = dict(await asyncio.gather(*(rustdesk_port(port) for port in (22, 21115, 21116, 21117))))
     open_ports = [str(p) for p, ok in ports.items() if ok]

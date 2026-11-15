@@ -94,6 +94,9 @@ body{font-stretch:88%}                       /* Martian Mono широкий — 
 
 /* таблица серверов: статус — прямоугольная метка, полосы без скруглений */
 .status{border-radius:2px;font-family:var(--mono);font-size:10.5px;padding:2px 7px}
+.status.paused{background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted);border:1px solid color-mix(in srgb,var(--muted) 35%,transparent)}
+tr.paused-row td{opacity:.55}
+.monitor-btn{min-width:26px}
 .disk-track,.disk-fill{border-radius:0}
 .disk-track{height:4px}
 table{border-radius:4px}

@@ -33,6 +33,10 @@ const I = {
     tip_no_err: "Ошибок соединения нет",
     tip_iface: "Интерфейс",
     tip_delete: "Удаление сервера",
+    tip_pause: "Выключить наблюдение",
+    tip_resume: "Включить наблюдение",
+    monitor_off: "наблюдение выключено",
+    monitor_on: "наблюдение включено",
     confirm_yes: "Да, удалить",
     confirm_no: "Отмена",
     server_added: "Сервер добавлен",
@@ -144,6 +148,10 @@ const I = {
     tip_no_err: "No connection errors",
     tip_iface: "Interface",
     tip_delete: "Delete server",
+    tip_pause: "Pause monitoring",
+    tip_resume: "Resume monitoring",
+    monitor_off: "monitoring paused",
+    monitor_on: "monitoring resumed",
     confirm_yes: "Yes, delete",
     confirm_no: "Cancel",
     server_added: "Server added",
@@ -516,7 +524,8 @@ function ramHtml(item) {
 
 /* =========  row  ========= */
 function rowTemplate(item) {
-  const cls = item.status === "up" ? "up" : "down";
+  const paused = item.status === "paused";
+  const cls = paused ? "paused" : item.status === "up" ? "up" : "down";
   const sn = esc(item.name);
   /* нет связи и ни одного замера — «—», а не «0 МБ»: ноль трафика и отсутствие данных — разные вещи */
   const noData = item.status !== "up" && !item.traffic_1d_gb && !item.traffic_month_gb;
@@ -526,7 +535,9 @@ function rowTemplate(item) {
   const pingCell = item.ping_ms != null ? num(item.ping_ms, item.ping_ms < 10 ? 1 : 0)
     : exitPing != null ? '<span class="ping-via" title="' + esc(U("лучший пинг с РФ-входа (матрица связности)", "best ping from an RU entry (connectivity matrix)")) + '">' + num(exitPing, 0) + '</span>'
     : "\u2014";
-  const statusText = item.status === "up" ? "UP" : (item.metrics_source && /server_metrics/.test(item.metrics_source) ? U("НЕТ МЕТРИК", "NO DATA") : "DOWN");
+  const statusText = paused ? U("ПАУЗА", "PAUSED")
+    : item.status === "up" ? "UP"
+      : (item.metrics_source && /server_metrics/.test(item.metrics_source) ? U("НЕТ МЕТРИК", "NO DATA") : "DOWN");
   const aka = (item.aliases || []).length ? ' <span class="aka" title="' + esc(U("в панели та же машина: ", "same machine in panel: ") + item.aliases.join(", ")) + '">+' + item.aliases.length + '</span>' : "";
   const cpuStyle = item.cpu_percent != null
     ? ' style="color:' + cpuColor(item.cpu_percent) + ';font-weight:600"' : '';
@@ -545,9 +556,13 @@ function rowTemplate(item) {
     '<button class="btn small iface-tip" type="button" title="' + ifaceTitle + '">I</button> ' +
     '<button class="btn small log-btn act-tip" type="button" data-server-name="' +
     logName + '" title="' + t('tip_log') + '">L</button> ' +
+    (isLocal ? '' :
+      '<button class="btn small monitor-btn act-tip" type="button" data-server-name="' +
+      sn + '" data-monitoring="' + (paused ? "0" : "1") + '" title="' +
+      esc(paused ? t('tip_resume') : t('tip_pause')) + '">' + (paused ? "\u25b6" : "\u23f8") + '</button> ') +
     '<button class="btn small delete-btn act-tip" type="button" data-server-name="' +
     sn + '"' + localAttr + ' title="' + t('tip_delete') + '">X</button></td>';
-  return '<tr>' +
+  return '<tr' + (paused ? ' class="paused-row"' : '') + '>' +
     nameCell +
     '<td>' + esc(item.host) + '</td>' +
     '<td><span class="status ' + cls + '">' + statusText + '</span></td>' +
@@ -780,7 +795,33 @@ rows.addEventListener("click", (ev) => {
 /* =========  delete with confirm overlay  ========= */
 let pendingDelete = null;
 let pendingDeleteLocal = false;
-rows.addEventListener("click", (ev) => {
+rows.addEventListener("click", async (ev) => {
+  const toggle = ev.target.closest(".monitor-btn");
+  if (toggle) {
+    const sn2 = toggle.dataset.serverName;
+    const enable = toggle.dataset.monitoring === "0";
+    if (!sn2) return;
+    toggle.disabled = true;
+    formMsg.textContent = enable ? t("monitor_on") : t("monitor_off");
+    formMsg.className = "msg";
+    try {
+      const r = await fetch("/api/servers/" + encodeURIComponent(sn2) + "/monitor", {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({enabled: enable}),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || "HTTP " + r.status);
+      formMsg.textContent = sn2 + " " + (enable ? t("monitor_on") : t("monitor_off"));
+      formMsg.className = "msg ok";
+      await refresh();
+    } catch (err) {
+      formMsg.textContent = t("error_prefix") + ": " + err.message;
+      formMsg.className = "msg bad";
+    }
+    toggle.disabled = false;
+    return;
+  }
   const btn = ev.target.closest(".delete-btn");
   if (!btn) return;
   const sn = btn.dataset.serverName;
