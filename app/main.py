@@ -16,6 +16,7 @@ import shlex
 import socket
 import ssl
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -78,7 +79,16 @@ class BotConfig(BaseModel):
     notify_disk_threshold: float | None = 95.0
     notify_rx_threshold: float | None = None
     notify_tx_threshold: float | None = None
-    notify_delay: int = 1
+    notify_delay: int = 3
+    # Гистерезис: тревога снимается только ниже порога на столько процентов,
+    # иначе 98% -> 89% -> 92% даёт «пожар» и «всё хорошо» каждые две минуты.
+    notify_hysteresis: float = 5.0
+    # Повтор по тому же серверу и метрике — не чаще, чем раз в столько минут.
+    notify_cooldown_min: int = 20
+    # Тихие часы во Владивостоке (HH:MM). Пусто — тихих часов нет. Гасит
+    # метрики (CPU/диск/трафик/пинг), но НЕ сообщения о недоступности.
+    quiet_from: str = ""
+    quiet_to: str = ""
 
 
 class AppConfig(BaseModel):
@@ -2437,6 +2447,7 @@ _cached_metrics: dict[str, Any] = {
 _metrics_lock = asyncio.Lock()
 
 _notified_state: dict[str, set[str]] = {}
+_clear_streak: dict[str, dict[str, int]] = {}
 _trigger_counts: dict[str, dict[str, int]] = {}
 
 
@@ -2651,6 +2662,34 @@ async def _notify_project_alerts_forever() -> None:
         await asyncio.sleep(120)
 
 
+_alert_last_sent: dict[tuple[str, str], float] = {}
+
+
+def _metric_limit(threshold: float | None, hysteresis: float, sticky: bool) -> float | None:
+    """Порог для уже поднятой тревоги ниже на гистерезис: без этого будет дребезг."""
+    if threshold is None:
+        return None
+    return threshold - (hysteresis if sticky else 0.0)
+
+
+def _quiet_now(bot: BotConfig) -> bool:
+    start = (bot.quiet_from or "").strip()
+    end = (bot.quiet_to or "").strip()
+    if not start or not end:
+        return False
+    try:
+        start_h, start_m = (int(part) for part in start.split(":"))
+        end_h, end_m = (int(part) for part in end.split(":"))
+    except (ValueError, TypeError):
+        return False
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=10)))  # ВЛД
+    current = now.hour * 60 + now.minute
+    begin, finish = start_h * 60 + start_m, end_h * 60 + end_m
+    if begin == finish:
+        return False
+    return begin <= current < finish if begin < finish else (current >= begin or current < finish)
+
+
 async def _check_and_notify(
     servers: list[dict[str, Any]],
 ) -> None:
@@ -2667,9 +2706,13 @@ async def _check_and_notify(
         if srv.get("status") == "paused":
             # Снят с наблюдения: ни тревог, ни «восстановлений».
             _trigger_counts.pop(name, None)
+            _clear_streak.pop(name, None)
+            _alert_last_sent.pop(name, None)
             continue
         counts = _trigger_counts.setdefault(name, {})
         triggered: set[str] = set()
+        prev = _notified_state.get(name, set())
+        hysteresis = max(bot.notify_hysteresis, 0.0)
         is_down = srv.get("status") == "down"
 
         # --- check each metric ---
@@ -2689,11 +2732,8 @@ async def _check_and_notify(
         frozen = dict(counts) if is_down else None
 
         cpu = srv.get("cpu_percent")
-        if (
-            bot.notify_cpu_threshold is not None
-            and cpu is not None
-            and cpu >= bot.notify_cpu_threshold
-        ):
+        cpu_limit = _metric_limit(bot.notify_cpu_threshold, hysteresis, "cpu" in prev)
+        if cpu_limit is not None and cpu is not None and cpu >= cpu_limit:
             counts["cpu"] = counts.get("cpu", 0) + 1
         else:
             counts["cpu"] = 0
@@ -2701,11 +2741,8 @@ async def _check_and_notify(
             triggered.add("cpu")
 
         ping = srv.get("ping_ms")
-        if (
-            bot.notify_ping_threshold is not None
-            and ping is not None
-            and ping >= bot.notify_ping_threshold
-        ):
+        ping_limit = _metric_limit(bot.notify_ping_threshold, hysteresis, "ping" in prev)
+        if ping_limit is not None and ping is not None and ping >= ping_limit:
             counts["ping"] = counts.get("ping", 0) + 1
         else:
             counts["ping"] = 0
@@ -2717,7 +2754,8 @@ async def _check_and_notify(
             total = srv.get("disk_total_gb")
             if free is not None and total and total > 0:
                 used_pct = ((total - free) / total) * 100
-                if used_pct >= bot.notify_disk_threshold:
+                disk_limit = _metric_limit(bot.notify_disk_threshold, hysteresis, "disk" in prev)
+                if disk_limit is not None and used_pct >= disk_limit:
                     counts["disk"] = counts.get("disk", 0) + 1
                 else:
                     counts["disk"] = 0
@@ -2729,11 +2767,8 @@ async def _check_and_notify(
             triggered.add("disk")
 
         rx = srv.get("rx_mbps")
-        if (
-            bot.notify_rx_threshold is not None
-            and rx is not None
-            and rx >= bot.notify_rx_threshold
-        ):
+        rx_limit = _metric_limit(bot.notify_rx_threshold, hysteresis, "rx" in prev)
+        if rx_limit is not None and rx is not None and rx >= rx_limit:
             counts["rx"] = counts.get("rx", 0) + 1
         else:
             counts["rx"] = 0
@@ -2741,18 +2776,14 @@ async def _check_and_notify(
             triggered.add("rx")
 
         tx = srv.get("tx_mbps")
-        if (
-            bot.notify_tx_threshold is not None
-            and tx is not None
-            and tx >= bot.notify_tx_threshold
-        ):
+        tx_limit = _metric_limit(bot.notify_tx_threshold, hysteresis, "tx" in prev)
+        if tx_limit is not None and tx is not None and tx >= tx_limit:
             counts["tx"] = counts.get("tx", 0) + 1
         else:
             counts["tx"] = 0
         if counts.get("tx", 0) >= delay:
             triggered.add("tx")
 
-        prev = _notified_state.get(name, set())
         if frozen is not None:
             # Host is down: keep the metric counters and alerts exactly
             # as they were, so only the outage itself is reported.
@@ -2761,10 +2792,30 @@ async def _check_and_notify(
             counts["down"] = frozen.get("down", 0) + 1
             triggered = (triggered & {"down"}) | (prev - {"down"})
         new_alerts = triggered - prev
-        recovered = prev - triggered
-        _notified_state[name] = triggered
-
+        # Восстановление тоже требует выдержки: один спокойный замер после
+        # всплеска — ещё не «всё хорошо».
+        clears = _clear_streak.setdefault(name, {})
+        confirmed_clear: set[str] = set()
+        for key in prev - triggered:
+            clears[key] = clears.get(key, 0) + 1
+            if clears[key] >= delay:
+                confirmed_clear.add(key)
+                clears.pop(key, None)
+        for key in triggered:
+            clears.pop(key, None)
+        recovered = confirmed_clear
+        quiet = _quiet_now(bot)
+        cooldown = max(bot.notify_cooldown_min, 0) * 60
+        told: set[str] = set()
         for key in sorted(new_alerts):
+            if key != "down" and quiet:
+                logger.info("alert muted by quiet hours: %s %s", name, key)
+                continue
+            last_sent = _alert_last_sent.get((name, key))
+            if cooldown and last_sent is not None and time.monotonic() - last_sent < cooldown:
+                logger.info("alert suppressed by cooldown: %s %s", name, key)
+                continue
+            told.add(key)
             if key == "down":
                 alerts.append(
                     f"\u26a0\ufe0f <b>{name}</b> is DOWN"
@@ -2800,6 +2851,10 @@ async def _check_and_notify(
                     f" {tx:.3f} Mbps"
                     f" \u2265 {bot.notify_tx_threshold}"
                 )
+
+        for key in told:
+            _alert_last_sent[(name, key)] = time.monotonic()
+        _notified_state[name] = (prev | told) - recovered
 
         # --- recovery notifications ---
         for key in sorted(recovered):
@@ -4054,7 +4109,16 @@ class BotConfigRequest(BaseModel):
     notify_disk_threshold: float | None = 95.0
     notify_rx_threshold: float | None = None
     notify_tx_threshold: float | None = None
-    notify_delay: int = 1
+    notify_delay: int = 3
+    # Гистерезис: тревога снимается только ниже порога на столько процентов,
+    # иначе 98% -> 89% -> 92% даёт «пожар» и «всё хорошо» каждые две минуты.
+    notify_hysteresis: float = 5.0
+    # Повтор по тому же серверу и метрике — не чаще, чем раз в столько минут.
+    notify_cooldown_min: int = 20
+    # Тихие часы во Владивостоке (HH:MM). Пусто — тихих часов нет. Гасит
+    # метрики (CPU/диск/трафик/пинг), но НЕ сообщения о недоступности.
+    quiet_from: str = ""
+    quiet_to: str = ""
 
 
 @app.put("/api/interval")
