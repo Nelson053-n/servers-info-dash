@@ -2672,7 +2672,8 @@ def _metric_limit(threshold: float | None, hysteresis: float, sticky: bool) -> f
     return threshold - (hysteresis if sticky else 0.0)
 
 
-def _quiet_now(bot: BotConfig) -> bool:
+def _quiet_now(bot: BotConfig, moment: dt.datetime | None = None) -> bool:
+    """Тихие часы по Владивостоку; окно может пересекать полночь (23:00-07:00)."""
     start = (bot.quiet_from or "").strip()
     end = (bot.quiet_to or "").strip()
     if not start or not end:
@@ -2682,7 +2683,7 @@ def _quiet_now(bot: BotConfig) -> bool:
         end_h, end_m = (int(part) for part in end.split(":"))
     except (ValueError, TypeError):
         return False
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=10)))  # ВЛД
+    now = moment or dt.datetime.now(dt.timezone(dt.timedelta(hours=10))).replace(tzinfo=None)
     current = now.hour * 60 + now.minute
     begin, finish = start_h * 60 + start_m, end_h * 60 + end_m
     if begin == finish:

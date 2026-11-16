@@ -103,3 +103,24 @@ def test_quiet_hours_mute_metrics_but_not_down(alerts, monkeypatch):
     for _ in range(3):
         cycle(m, None, status='down')
     assert len(sent) == 1 and 'DOWN' in sent[0]
+
+
+def test_quiet_hours_span_midnight(alerts, monkeypatch):
+    import datetime as dt
+    m, sent = alerts
+    bot = m.cfg.bot
+    monkeypatch.setattr(bot, 'quiet_from', '23:00', raising=False)
+    monkeypatch.setattr(bot, 'quiet_to', '07:00', raising=False)
+    def at(hour, minute=0):
+        return m._quiet_now(bot, dt.datetime(2026, 11, 17, hour, minute))
+    assert at(23, 30) and at(3, 0) and at(6, 59)
+    assert not at(22, 59) and not at(7, 0) and not at(12, 0)
+
+
+def test_quiet_hours_disabled_when_empty(alerts, monkeypatch):
+    import datetime as dt
+    m, _ = alerts
+    bot = m.cfg.bot
+    monkeypatch.setattr(bot, 'quiet_from', '', raising=False)
+    monkeypatch.setattr(bot, 'quiet_to', '', raising=False)
+    assert m._quiet_now(bot, dt.datetime(2026, 11, 17, 3, 0)) is False
