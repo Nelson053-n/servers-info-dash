@@ -105,6 +105,9 @@ def alerts(main_module, monkeypatch, tmp_path):
 def test_bad_issue_notifies_once_and_recovers(alerts):
     import asyncio
     m, state, sent, snapshot = alerts
+    # замечание подтверждается вторым циклом: одиночный сбой не будит
+    asyncio.run(m._project_alert_cycle())
+    assert sent == []
     asyncio.run(m._project_alert_cycle())
     assert len(sent) == 1 and 'Резервные копии' in sent[0]
     assert state.exists() and oct(state.stat().st_mode)[-3:] == '600'

@@ -75,7 +75,7 @@ def test_hysteresis_keeps_alarm_until_value_drops_below_margin(alerts):
 def test_repeat_alerts_are_paused_by_cooldown(alerts, monkeypatch):
     m, sent = alerts
     clock = [1000.0]
-    monkeypatch.setattr(m.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(m.time, 'time', lambda: clock[0])
     for _ in range(3):
         cycle(m, 98.0)
     assert len(sent) == 1
