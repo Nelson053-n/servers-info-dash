@@ -64,6 +64,35 @@ def load(name, path):
 pull = load('private_pull', REPO / 'pull-audit-from-giga.py')
 
 
+VERIFY_STATE = 'verify-state.json'
+
+
+def publish_state(status, started, finished=None, results=None):
+    """Состояние проверки на VM310: по нему карточка отличает «идёт» от «не подтверждён»."""
+    payload = {
+        'status': status,
+        'started_at': started,
+        'finished_at': finished,
+        'sources': [{'source': r.get('source'), 'status': r.get('status')} for r in (results or [])],
+        'failed': [r.get('source') for r in (results or []) if r.get('status') == 'failed'],
+    }
+    blob = base64.b64encode(json.dumps(payload).encode()).decode()
+    code = '''import base64,json,os,pwd
+from pathlib import Path
+base=Path('/var/lib/info-backup/projects');u=pwd.getpwnam('info-backup')
+folder=base/'database-restore-proofs';folder.mkdir(mode=0o700,exist_ok=True)
+os.chmod(folder,0o700);os.chown(folder,u.pw_uid,u.pw_gid)
+p=folder/NAME.encode().decode();temporary=p.with_suffix('.tmp')
+temporary.write_text(base64.b64decode(BLOB).decode())
+os.chmod(temporary,0o600);os.chown(temporary,u.pw_uid,u.pw_gid);os.replace(temporary,p)
+print('state_written')
+'''.replace('NAME', repr(VERIFY_STATE)).replace('BLOB', repr(blob))
+    try:
+        pull.guest(code)
+    except Exception as error:  # noqa: BLE001 — состояние не должно ломать саму проверку
+        say('state_write_failed', reason=type(error).__name__)
+
+
 def say(kind, **values):
     print(json.dumps({'event': kind, 'at': dt.datetime.now(dt.timezone.utc).isoformat(), **values},
                      ensure_ascii=False), flush=True)
@@ -321,6 +350,8 @@ def main():
     os.umask(0o077)
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     root = Path(tempfile.mkdtemp(prefix='db-verify-', dir=STATE))
+    started = dt.datetime.now(dt.timezone.utc).isoformat()
+    publish_state('running', started)
     results, failed = [], []
     for source in [s.strip() for s in args.sources.split(',') if s.strip()]:
         try:
@@ -335,6 +366,7 @@ def main():
     summary = {'finished_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'sources': results,
                'failed': failed}
     (STATE / 'last-run.json').write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    publish_state('failed' if failed else 'ok', started, summary['finished_at'], results)
     if not args.no_publish and not failed:
         publish()
     say('finished', failed=failed, sources=[(r['source'], r['status']) for r in results])

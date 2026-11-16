@@ -20,7 +20,7 @@ def when(s):
 
 
 def validate(d,now):
-    if not isinstance(d,dict) or set(d)-{'schema_version','source_id','collector_status','observed_at','attempted_at','schedule_enabled','sources','last_check_verified_at','check_result'}:raise ValueError('unexpected fields')
+    if not isinstance(d,dict) or set(d)-{'schema_version','source_id','collector_status','observed_at','attempted_at','schedule_enabled','sources','last_check_verified_at','check_result','database_verification'}:raise ValueError('unexpected fields')
     if type(d.get('schema_version')) is not int or d['schema_version']!=2 or d.get('source_id')!='giga-projects' or d.get('collector_status')!='ok':raise ValueError('scope mismatch')
     observed=when(d['observed_at']);attempted=when(d['attempted_at'])
     if not observed<=attempted<=now+dt.timedelta(minutes=5):raise ValueError('future observation')
@@ -42,6 +42,14 @@ def validate(d,now):
     if d.get('check_result','unknown') not in {'passed','failed','unknown'}:raise ValueError('invalid check')
     if d.get('last_check_verified_at') is not None and when(d['last_check_verified_at'])>observed:raise ValueError('future check')
     if d.get('check_result')=='passed' and not d.get('last_check_verified_at'):raise ValueError('check without evidence')
+    verification=d.get('database_verification')
+    if verification is not None:
+        if not isinstance(verification,dict) or set(verification)-{'status','started_at','finished_at','failed_sources'}:raise ValueError('invalid verification block')
+        if verification.get('status') not in {'running','ok','failed','unknown'}:raise ValueError('invalid verification status')
+        for key in ('started_at','finished_at'):
+            if verification.get(key) is not None and (when(verification[key])>now+dt.timedelta(minutes=5)):raise ValueError('future verification')
+        failed=verification.get('failed_sources') or []
+        if not isinstance(failed,list) or any(x not in SOURCES for x in failed):raise ValueError('unknown verification source')
     return d
 
 
@@ -92,8 +100,21 @@ def analytics(d,now):
     measured=[r.get('logical_bytes') for r in d['sources'].values() if r.get('result')=='success' and type(r.get('logical_bytes')) is int]
     size_total=round(sum(measured)/1024**3,1) if measured else None
     db_imports=sum(d['sources'].get(s,{}).get('database_restore_result')=='passed' for s in ('ru3','lv3','vm300-code','bob'))
+    verification=d.get('database_verification') or {}
+    verify_status=verification.get('status')
     for id,label,value,unit in [('covered','Проекты со свежей копией',good,'шт'),('expected','Проектов в охвате',sum(len(x) for x in SOURCES.values())-1+len(MISSING),'шт'),('check','Репозиторий проверен чтением',(display_date(d['last_check_verified_at'])+' ВЛД') if d.get('last_check_verified_at') else None,''),('schedule','Автоматическое копирование','Ежедневно в 06:00 ВЛД' if d['schedule_enabled'] else 'Не включено',''),('size_total','Объём копий',size_total,'ГиБ'),('database_imports','Импорт серверных БД из копии',str(db_imports)+'/4','источника')]:
         metrics.append(dict(id=id,metric=id,label=label,value=value,unit=unit,period='На момент наблюдения',source='Giga: резервирование проектов',generated_at=d['observed_at'],last_success=d['observed_at'],status='stale' if stale else 'ok',error=None))
+    if db_imports < 4:
+        metric=next((m for m in metrics if m['id']=='database_imports'),None)
+        if metric is not None:
+            if verify_status=='running':
+                # Архив только что пришёл: импорт ещё идёт, это не проблема.
+                metric.update(value='проверка идёт',unit='',status='partial',state='warn')
+            elif verify_status=='failed':
+                failed=verification.get('failed_sources') or []
+                metric.update(value='не подтверждён',unit='',status='error',state='bad')
+                alerts.append(dict(severity='bad',text='Импорт серверных БД из копии не подтвердился'
+                                   + (': ' + ', '.join(failed) if failed else '')))
     limitations=[dict(id='backup_restore_scope',title='Что проверено при восстановлении',impact='Восстановление архива из Restic, совпадение SHA и целостность SQLite. Запуск PostgreSQL/MySQL и приложений из копии пока отдельно не проверен.',action='Проверить восстановление серверных баз и запуск приложений в изоляции.'),dict(id='backup_offsite_retention',title='Копии находятся на одном Giga',impact='Независимая внешняя копия не подключена. Удаление старых копий пока не включено.',action='Согласовать внешнее хранилище и политику хранения.')]
     if db_imports == 4:
         # Exact archive evidence is a different scope from historical stand-alone

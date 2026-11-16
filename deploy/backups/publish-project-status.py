@@ -67,6 +67,12 @@ if __name__=='__main__':
         sources[name]=clean
     enabled=subprocess.run(['systemctl','is-enabled','--quiet','projects-backup.timer'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
     d=dict(schema_version=2,source_id='giga-projects',collector_status='ok',observed_at=now.isoformat(),attempted_at=now.isoformat(),schedule_enabled=enabled,sources=sources,check_result=raw.get('check_result','unknown'),last_check_verified_at=raw.get('last_check_verified_at'))
+    # Проверка импорта идёт отдельным процессом: карточка должна знать, ждать её или ругаться.
+    try:
+        state=json.loads((path.parent/'database-restore-proofs'/'verify-state.json').read_text())
+        d['database_verification']={'status':state.get('status'),'started_at':state.get('started_at'),'finished_at':state.get('finished_at'),'failed_sources':state.get('failed') or []}
+    except (OSError,ValueError,KeyError,TypeError):
+        pass
     contract.validate(d,now)
     r=subprocess.run(transport.ssh_argv()[:-1]+['publish-projects-backup-status-v1'],input=json.dumps(d,allow_nan=False).encode(),stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=35,env=transport.CLEAN_ENV)
     if r.returncode==0 and r.stdout in (b'accepted\n',b'already accepted\n'):

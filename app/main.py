@@ -3,6 +3,7 @@ import csv
 import datetime as dt
 import hashlib
 import hmac
+import http.client
 import io
 import ipaddress
 import json
@@ -12,6 +13,8 @@ import platform
 import re
 import secrets
 import shlex
+import socket
+import ssl
 import subprocess
 import urllib.parse
 import urllib.request
@@ -67,6 +70,8 @@ class BotConfig(BaseModel):
     enabled: bool = False
     token: str = ""
     chat_id: str = ""
+    # С RU2 прямой api.telegram.org недоступен (ТСПУ): ходим через локальный SOCKS5.
+    socks_proxy: str = ""
     notify_down: bool = True
     notify_cpu_threshold: float | None = 90.0
     notify_ping_threshold: float | None = None
@@ -2439,46 +2444,211 @@ def _tg_api(
     token: str, method: str, payload: dict[str, Any], timeout: int = 10,
 ) -> Any:
     """Call a Bot API method (sync). Returns `result`, or None on failure."""
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/{method}",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
+        return _telegram_call(token, method, payload, timeout=timeout)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Telegram %s failed: %s", method, exc)
         return None
-    if not isinstance(data, dict) or not data.get("ok"):
-        logger.warning("Telegram %s rejected: %s", method, data)
-        return None
-    return data.get("result")
+
+
+def _socks5_connect(proxy: str, host: str, port: int, timeout: float = 10) -> socket.socket:
+    """Минимальный SOCKS5 без авторизации: иначе на RU2 не достучаться до Telegram."""
+    proxy_host, _, proxy_port = proxy.partition(":")
+    sock = socket.create_connection((proxy_host, int(proxy_port)), timeout=timeout)
+    try:
+        sock.sendall(b"\x05\x01\x00")
+        if sock.recv(2) != b"\x05\x00":
+            raise OSError("socks5 greeting rejected")
+        raw = host.encode("idna")
+        request = b"\x05\x01\x00\x03" + bytes([len(raw)]) + raw + port.to_bytes(2, "big")
+        sock.sendall(request)
+        head = sock.recv(4)
+        if len(head) < 4 or head[1] != 0:
+            raise OSError("socks5 connect rejected")
+        atyp = head[3]
+        if atyp == 1:
+            sock.recv(4)
+        elif atyp == 3:
+            length = sock.recv(1)[0]
+            sock.recv(length)
+        elif atyp == 4:
+            sock.recv(16)
+        sock.recv(2)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+class _SocksHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS поверх SOCKS5: стандартный HTTPSConnection так не умеет."""
+
+    def __init__(self, host: str, proxy: str, timeout: float = 15) -> None:
+        super().__init__(host, 443, timeout=timeout, context=ssl.create_default_context())
+        self._proxy = proxy
+
+    def connect(self) -> None:  # noqa: D401 — сигнатура stdlib
+        raw = _socks5_connect(self._proxy, self.host, 443, timeout=self.timeout)
+        self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+
+
+def _telegram_call(token: str, method: str, payload: dict[str, Any] | None = None,
+                   timeout: float = 15) -> Any:
+    """Вызов Bot API: сначала через прокси (если задан), затем напрямую."""
+    body = json.dumps(payload or {}).encode()
+    headers = {"Content-Type": "application/json"}
+    path = f"/bot{token}/{method}"
+    proxy = (cfg.bot.socks_proxy or "").strip()
+    errors: list[str] = []
+    if proxy:
+        try:
+            conn = _SocksHTTPSConnection("api.telegram.org", proxy, timeout=timeout)
+            try:
+                conn.request("POST", path, body=body, headers=headers)
+                response = conn.getresponse()
+                data = json.loads(response.read() or b"{}")
+                if isinstance(data, dict) and data.get("ok"):
+                    return data.get("result")
+                errors.append(f"proxy: {data.get('description') if isinstance(data, dict) else 'bad reply'}")
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"proxy: {type(exc).__name__}: {exc}")
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org{path}", data=body, headers=headers, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = json.loads(response.read() or b"{}")
+            return data.get("result") if isinstance(data, dict) else None
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"direct: {type(exc).__name__}: {exc}")
+    raise OSError("; ".join(errors) or "telegram request failed")
 
 
 def _send_telegram(token: str, chat_id: str, text: str) -> bool:
     """Send a message via Telegram Bot API (sync). True on success."""
-    url = (
-        f"https://api.telegram.org/bot{token}"
-        f"/sendMessage"
-    )
-    payload = json.dumps(
-        {"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-    ).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10):
-            pass
+        _telegram_call(token, "sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Telegram send failed: %s", exc)
         return False
     return True
+
+
+PROJECT_ALERT_PATH = Path("config/project_alert_state.json")
+# Замечание -> когда о нём сообщили; одно и то же не чаще, чем раз в PROJECT_ALERT_TTL_H часов.
+_PROJECT_ALERTS: dict[str, dict[str, Any]] = {}
+PROJECT_ALERT_TTL_H = 12
+
+
+def _load_project_alert_state() -> dict[str, dict[str, Any]]:
+    try:
+        raw = json.loads(PROJECT_ALERT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    clean: dict[str, dict[str, Any]] = {}
+    for key, meta in raw.items():
+        if isinstance(key, str) and isinstance(meta, dict):
+            clean[key] = {
+                "state": meta.get("state") if isinstance(meta.get("state"), str) else None,
+                "at": meta.get("at") if isinstance(meta.get("at"), str) else None,
+                "project": meta.get("project") if isinstance(meta.get("project"), str) else None,
+            }
+    return clean
+
+
+def _save_project_alert_state() -> None:
+    PROJECT_ALERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(_PROJECT_ALERTS, ensure_ascii=False, indent=2)
+    tmp_path = PROJECT_ALERT_PATH.with_name(f".{PROJECT_ALERT_PATH.name}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, PROJECT_ALERT_PATH)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    PROJECT_ALERT_PATH.chmod(0o600)
+
+
+def _alert_age_hours(value: str | None) -> float:
+    if not value:
+        return 1e9
+    try:
+        moment = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return 1e9
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return (dt.datetime.now(dt.timezone.utc) - moment).total_seconds() / 3600
+
+
+async def _project_alert_cycle() -> None:
+    """Новое «плохое» замечание проекта — сообщение; снятое — сообщение о восстановлении."""
+    bot = cfg.bot
+    if not (bot.token and bot.chat_id):
+        return
+    snapshot = projects_tab.snapshot()
+    projects = snapshot.get("projects") or []
+    if not projects:
+        return
+    now = dt.datetime.now(dt.timezone.utc)
+    active: dict[str, dict[str, str]] = {}
+    for project in projects:
+        if project.get("state") == "paused":
+            continue
+        for issue in project.get("issues") or []:
+            if issue.get("severity") != "bad":
+                continue
+            text = (issue.get("text") or "").strip()
+            if not text:
+                continue
+            key = f"{project.get('id')}|{text[:160]}"
+            active[key] = {"project": str(project.get("name") or project.get("id")), "text": text}
+    changed = False
+    for key, info in active.items():
+        sent = _PROJECT_ALERTS.get(key) or {}
+        if sent.get("state") == "bad" and _alert_age_hours(sent.get("at")) < PROJECT_ALERT_TTL_H:
+            continue
+        ok = await asyncio.to_thread(
+            _send_telegram, bot.token, bot.chat_id,
+            f"\u26a0\ufe0f Info \u00b7 {info['project']}\n{info['text']}",
+        )
+        if not ok:
+            continue
+        _PROJECT_ALERTS[key] = {"state": "bad", "at": now.isoformat(), "project": info["project"]}
+        changed = True
+    for key, sent in list(_PROJECT_ALERTS.items()):
+        if key in active or sent.get("state") != "bad":
+            continue
+        ok = await asyncio.to_thread(
+            _send_telegram, bot.token, bot.chat_id,
+            f"\u2705 Info \u00b7 {sent.get('project') or key.split('|')[0]}\nзамечание снято",
+        )
+        if ok:
+            _PROJECT_ALERTS[key] = {"state": "ok", "at": now.isoformat(), "project": sent.get("project")}
+            changed = True
+    for key, sent in list(_PROJECT_ALERTS.items()):
+        if sent.get("state") == "ok" and _alert_age_hours(sent.get("at")) > 24 * 7:
+            _PROJECT_ALERTS.pop(key, None)
+            changed = True
+    if changed:
+        _save_project_alert_state()
+
+
+async def _notify_project_alerts_forever() -> None:
+    while True:
+        try:
+            await _project_alert_cycle()
+        except Exception:  # noqa: BLE001 — фоновая задача не должна умирать
+            logger.exception("project alerts cycle failed")
+        await asyncio.sleep(120)
 
 
 async def _check_and_notify(
@@ -2751,6 +2921,8 @@ async def _start_background_tasks() -> None:
     asyncio.create_task(_telegram_callback_poller())
     asyncio.create_task(projects_tab.run_forever())
     asyncio.create_task(projects_tab.auto_resume_forever())
+    _PROJECT_ALERTS.update(_load_project_alert_state())
+    asyncio.create_task(_notify_project_alerts_forever())
 
 
 @app.on_event("shutdown")
@@ -3875,6 +4047,7 @@ class BotConfigRequest(BaseModel):
     enabled: bool = False
     token: str = ""
     chat_id: str = ""
+    socks_proxy: str = ""
     notify_down: bool = True
     notify_cpu_threshold: float | None = 90.0
     notify_ping_threshold: float | None = None
