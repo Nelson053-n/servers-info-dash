@@ -316,8 +316,35 @@
     return s;
   }
   /* Единая надпись статуса проекта для всех разделов + отдельная метка режима (восстановление, тест). */
-  const STATE_TEXT = {ok: "норма", warn: "замечания", bad: "проблема"};
-  const stateChip = (state) => chip(state, STATE_TEXT[state] || state);
+  const STATE_TEXT = {ok: "норма", warn: "замечания", bad: "проблема", paused: "на паузе"};
+  const stateChip = (state) => chip(state === "paused" ? "off" : state, STATE_TEXT[state] || state);
+  /* Одна кнопка для проекта и для монитора: пауза = «сознательно не смотрим». */
+  function pauseButton(kind, key, paused) {
+    const b = el("button", "btn small pause-btn", paused ? "\u25b6 включить" : "\u23f8 снять");
+    b.type = "button";
+    b.title = paused ? "Вернуть в наблюдение" : "Выключить наблюдение (не считать ошибкой)";
+    b.setAttribute("aria-pressed", String(!!paused));
+    b.addEventListener("click", async (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      b.disabled = true;
+      try {
+        const base = kind === "projects" ? "/api/projects/" : "/api/monitors/";
+        const r = await fetch(base + encodeURIComponent(key) + "/monitor", {
+          method: "PUT", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({enabled: !!paused}),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        await load();
+        route();
+      } catch (err) {
+        b.title = "Не получилось: " + (err.message || err);
+        b.textContent = "ошибка";
+      }
+      b.disabled = false;
+    });
+    return b;
+  }
+  const pausedNote = (p) => p.paused_note ? " · " + p.paused_note : "";
   function modeTag(p) {
     const s = p.stage || "";
     const mode = /восстановл|из копии|без prod/i.test(s) ? "восстановление" : /тест/i.test(s) ? "тест" : null;
@@ -357,8 +384,14 @@
       requestAnimationFrame(() => drawChart(sp, spark, {spark: true}));
     }
     const foot = el("div", "pcard-foot");
-    foot.append(el("span", null, siteLine(p)));
-    const fr = freshness(p.analytics); if (fr) foot.append(fr);
+    if (p.state === "paused") {
+      foot.append(el("span", "muted", "наблюдение выключено" + pausedNote(p)));
+      foot.append(pauseButton("projects", p.id, true));
+    } else {
+      foot.append(el("span", null, siteLine(p)));
+      const fr = freshness(p.analytics); if (fr) foot.append(fr);
+      foot.append(pauseButton("projects", p.id, false));
+    }
     card.append(foot);
     return card;
   }
@@ -448,7 +481,7 @@
     ((overview && overview.projects) || []).forEach((p) => {
       if (!p.allIssues) p.allIssues = p.issues.slice();
       p.issues = p.allIssues.filter((r) => !hid[issueKey(p, r)]);
-      p.state = stateOfIssues(p.issues);
+      if (p.state !== "paused") p.state = stateOfIssues(p.issues);
     });
   }
   /* Все матрицы связности из подробных документов проектов (сейчас — OneYearSolution). */
@@ -685,8 +718,8 @@
     all.href = "#projects";
     head.append(el("h2", null, "Проекты"), all); card.append(head);
     const list = el("div", "project-rows");
-    const order = {bad: 0, warn: 1, ok: 2};
-    overview.projects.slice().sort((a, b) => order[a.state] - order[b.state]).forEach((p) => {
+    const order = {bad: 0, warn: 1, ok: 2, paused: 3};
+    overview.projects.slice().sort((a, b) => (order[a.state] ?? 4) - (order[b.state] ?? 4)).forEach((p) => {
       const row = el("a", "project-row"); row.href = "#projects/" + p.id;
       const name = el("div", "project-name");
       const nb = el("b", null, p.name), tag = modeTag(p); if (tag) nb.append(tag);
@@ -702,9 +735,11 @@
         figures.append(figure);
       });
       if (!figures.children.length) figures.append(el("span", "muted", "Нет подтверждённой аналитики"));
-      const site = el("span", "project-site", siteLine(p));
-      const fr = freshness(p.analytics); if (fr) { site.append(el("br")); site.append(fr); }
-      row.append(name, status, figures, site);
+      const site = el("span", "project-site",
+        p.state === "paused" ? "наблюдение выключено" + pausedNote(p) : siteLine(p));
+      const fr = p.state === "paused" ? null : freshness(p.analytics);
+      if (fr) { site.append(el("br")); site.append(fr); }
+      row.append(name, status, figures, site, pauseButton("projects", p.id, p.state === "paused"));
       list.append(row);
     });
     card.append(list); return card;
@@ -973,7 +1008,7 @@
     if (!overview || !overview.ready) { v.append(el("p", "muted", "Сбор данных…")); return; }
     const filters = el("div", "filters");
     filters.setAttribute("role", "group"); filters.setAttribute("aria-label", "Фильтр");
-    const issues = overview.projects.filter((p) => p.state !== "ok").length;
+    const issues = overview.projects.filter((p) => p.state !== "ok" && p.state !== "paused").length;
     [["all", "Все · " + overview.projects.length], ["issues", "С замечаниями · " + issues], ["money", "Деньги"]].forEach(([k, t]) => {
       const b = el("button", k === "issues" && issues ? "warn" : "", t);
       b.type = "button"; b.setAttribute("aria-pressed", String(projFilter === k));
@@ -982,11 +1017,11 @@
     });
     v.append(viewHead(updated() + " · проверка раз в " + Math.round(overview.refresh_sec / 60) + " мин", "Проекты", filters));
     let ps = overview.projects.slice();
-    if (projFilter === "issues") ps = ps.filter((p) => p.state !== "ok");
+    if (projFilter === "issues") ps = ps.filter((p) => p.state !== "ok" && p.state !== "paused");
     if (projFilter === "money") ps = ps.filter((p) => p.analytics && typeof p.analytics.revenue_30d === "number");
-    const order = {bad: 0, warn: 1, ok: 2};
+    const order = {bad: 0, warn: 1, ok: 2, paused: 3};
     const grid = el("div", "pcards");
-    ps.sort((a, b) => order[a.state] - order[b.state]).forEach((p) => grid.append(projectCard(p)));
+    ps.sort((a, b) => (order[a.state] ?? 4) - (order[b.state] ?? 4)).forEach((p) => grid.append(projectCard(p)));
     if (!ps.length) grid.append(el("p", "muted", "Нет проектов под этот фильтр"));
     v.append(grid);
   }
@@ -1015,7 +1050,7 @@
       const rows = (tb.rows || []).slice();
       if (sortCol) rows.sort((a, b) => cmp(sortCol, a, b));
       rows.forEach((r) => {
-        const tr = el("tr");
+        const tr = el("tr", r && r.paused ? "paused-row" : "");
         if (cols.some((c) => isBlockCol(c) && isYes(r[c.key]))) tr.className = "blk";
         cols.forEach((c) => {
           const v = r[c.key], td = el("td", c.num ? "num" : "");
@@ -1024,6 +1059,7 @@
           else td.textContent = v == null || v === "" ? "нет данных" : c.num && typeof v === "number" ? fmtValue(v, c.unit) : String(v);
           if (isBlockCol(c) && isYes(v)) td.classList.add("blocked");
           tr.append(td);
+          if (tb.id === "kuma_monitors" && r && r.monitor) tr.append(el("td", null, pauseButton("monitors", String(r.monitor), !!r.paused)));
         });
         body.append(tr);
       });
@@ -1044,6 +1080,7 @@
       th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
       hr.append(th);
     });
+    if (tb.id === "kuma_monitors") hr.append(el("th", null, "Действия"));
     thead.append(hr);
     paintBody();
     table.append(thead, body); wrap.append(table); card.append(wrap);
@@ -1068,7 +1105,12 @@
     const right = el("div", "filters");
     const shownState = stateOfIssues(p.issues.filter((r) => !snoozed()[issueKey(p, r)]));
     const summaryMissing = shownState === "warn" && p.analytics?.error && p.check?.http >= 200 && p.check.http < 400;
-    right.append(chip(shownState, shownState === "warn" && summaryMissing ? "сводка неполная" : STATE_TEXT[shownState]));
+    if (p.state === "paused") {
+      right.append(chip("off", "на паузе"), pauseButton("projects", p.id, true));
+    } else {
+      right.append(chip(shownState, shownState === "warn" && summaryMissing ? "сводка неполная" : STATE_TEXT[shownState]));
+      right.append(pauseButton("projects", p.id, false));
+    }
     const tagP = modeTag(p); if (tagP) right.prepend(tagP);
     if (p.link) { const a = el("a", "btn", "Открыть сайт ↗"); a.href = p.link; a.target = "_blank"; a.rel = "noopener"; right.append(a); }
     const an = p.analytics;
@@ -1188,7 +1230,7 @@
         a.append(el("span", null, p.name), el("span", "sdot " + p.state));
         sub.append(a);
       });
-      const issues = overview.projects.filter((p) => p.state !== "ok").length;
+      const issues = overview.projects.filter((p) => p.state !== "ok" && p.state !== "paused").length;
       const cp = $("cntProjects"); cp.textContent = issues ? String(issues) : String(overview.projects.length); cp.className = "cnt" + (issues ? " warn" : "");
       const hid = snoozed(), todo = insights().filter((i) => !hid[i.key]);
       const nb = todo.filter((i) => i.sev === "bad").length;

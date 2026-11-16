@@ -2750,6 +2750,7 @@ async def _start_background_tasks() -> None:
     asyncio.create_task(_background_collector())
     asyncio.create_task(_telegram_callback_poller())
     asyncio.create_task(projects_tab.run_forever())
+    asyncio.create_task(projects_tab.auto_resume_forever())
 
 
 @app.on_event("shutdown")
@@ -3592,6 +3593,53 @@ async def set_server_monitor(
         "server": name,
         "monitoring": bool(payload.enabled),
         "paused_servers": sorted(MONITOR_PAUSED),
+    }
+
+
+class MonitorPauseRequest(BaseModel):
+    enabled: bool
+    note: str | None = Field(default=None, max_length=200)
+    resume_at: str | None = Field(default=None, max_length=40)
+
+
+@app.put("/api/projects/{project_id}/monitor")
+async def set_project_monitor(project_id: str, payload: MonitorPauseRequest) -> dict[str, Any]:
+    """Снять/вернуть проект (сайт, сводку) из наблюдения."""
+    pid = project_id.strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="project id is required")
+    known = {row.get("id") for row in (projects_tab.snapshot().get("projects") or [])}
+    try:
+        known |= {p.id for p in projects_tab.load_projects_config().projects}
+    except Exception:  # noqa: BLE001 — битый конфиг не должен мешать кнопке
+        pass
+    if pid not in known:
+        raise HTTPException(status_code=404, detail="Project not found")
+    meta = projects_tab.set_pause("projects", pid, payload.enabled, payload.note, payload.resume_at)
+    projects_tab.apply_pause_to_cache("projects", pid, meta)
+    return {
+        "status": "ok",
+        "project": pid,
+        "monitoring": bool(payload.enabled),
+        "paused_until": (meta or {}).get("resume_at"),
+        "paused_projects": sorted(projects_tab.PAUSED.get("projects", {})),
+    }
+
+
+@app.put("/api/monitors/{monitor_key}/monitor")
+async def set_kuma_monitor(monitor_key: str, payload: MonitorPauseRequest) -> dict[str, Any]:
+    """Снять/вернуть монитор Kuma из наблюдения (ключ — то, как он назван в сводке)."""
+    key = monitor_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="monitor key is required")
+    meta = projects_tab.set_pause("monitors", key, payload.enabled, payload.note, payload.resume_at)
+    projects_tab.apply_pause_to_cache("monitors", key, meta)
+    return {
+        "status": "ok",
+        "monitor": key,
+        "monitoring": bool(payload.enabled),
+        "paused_until": (meta or {}).get("resume_at"),
+        "paused_monitors": sorted(projects_tab.PAUSED.get("monitors", {})),
     }
 
 

@@ -92,6 +92,144 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+PAUSE_STATE_PATH = Path("config/pause_state.json")
+# kind -> key -> {"since", "note", "resume_at"}; нет ключа = наблюдение включено
+PAUSE_KINDS = ("projects", "monitors")
+PAUSED: dict[str, dict[str, dict[str, Any]]] = {kind: {} for kind in PAUSE_KINDS}
+
+
+def load_pause_state() -> dict[str, dict[str, dict[str, Any]]]:
+    """Кто снят с наблюдения. Битый файл не должен ломать вкладку «Проекты»."""
+    out: dict[str, dict[str, dict[str, Any]]] = {kind: {} for kind in PAUSE_KINDS}
+    try:
+        raw = json.loads(PAUSE_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return out
+    if not isinstance(raw, dict):
+        return out
+    for kind in PAUSE_KINDS:
+        section = raw.get(kind)
+        if not isinstance(section, dict):
+            continue
+        for key, meta in section.items():
+            if not isinstance(key, str) or not key or not isinstance(meta, dict):
+                continue
+            out[kind][key] = {
+                "since": meta.get("since") if isinstance(meta.get("since"), str) else None,
+                "note": meta.get("note") if isinstance(meta.get("note"), str) else None,
+                "resume_at": meta.get("resume_at") if isinstance(meta.get("resume_at"), str) else None,
+            }
+    return out
+
+
+def save_pause_state() -> None:
+    """0600 и атомарная замена: файл меняется кнопкой из интерфейса."""
+    PAUSE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(PAUSED, ensure_ascii=False, indent=2)
+    tmp_path = PAUSE_STATE_PATH.with_name(f".{PAUSE_STATE_PATH.name}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, PAUSE_STATE_PATH)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    PAUSE_STATE_PATH.chmod(0o600)
+
+
+def pause_entry(kind: str, key: str) -> dict[str, Any] | None:
+    return PAUSED.get(kind, {}).get(key)
+
+
+def set_pause(kind: str, key: str, enabled: bool, note: str | None = None,
+              resume_at: str | None = None) -> dict[str, Any] | None:
+    """enabled=True — вернуть в наблюдение; False — снять (note и resume_at необязательны)."""
+    if kind not in PAUSED:
+        raise KeyError(kind)
+    if enabled:
+        PAUSED[kind].pop(key, None)
+    else:
+        PAUSED[kind][key] = {
+            "since": _now().isoformat(timespec="seconds"),
+            "note": (note or "").strip() or None,
+            "resume_at": (resume_at or "").strip() or None,
+        }
+    save_pause_state()
+    return PAUSED[kind].get(key)
+
+
+def resume_due(now: dt.datetime | None = None) -> list[tuple[str, str]]:
+    """Снять паузу у тех, кому назначено время возврата и оно уже прошло."""
+    moment = now or _now()
+    resumed: list[tuple[str, str]] = []
+    for kind, section in PAUSED.items():
+        for key, meta in list(section.items()):
+            raw = meta.get("resume_at")
+            if not raw:
+                continue
+            try:
+                due = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=dt.timezone.utc)
+            if due <= moment:
+                section.pop(key, None)
+                resumed.append((kind, key))
+    if resumed:
+        save_pause_state()
+    return resumed
+
+
+def apply_pause_to_cache(kind: str, key: str, meta: dict[str, Any] | None) -> None:
+    """Кнопка должна менять картинку сразу, не дожидаясь следующего цикла."""
+    rows = _cache.get("projects")
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if kind == "projects" and row.get("id") == key:
+            if meta:
+                row.update({
+                    "state": "paused", "issues": [], "check": None, "tls": None, "analytics": None,
+                    "paused_since": meta.get("since"), "paused_note": meta.get("note"),
+                    "paused_until": meta.get("resume_at"),
+                })
+            else:
+                row.update({
+                    "state": "warn",
+                    "issues": [{"severity": "warn", "text": "наблюдение включено — идёт первая проверка"}],
+                    "paused_since": None, "paused_note": None, "paused_until": None,
+                })
+        if kind == "monitors":
+            for table in (row.get("analytics") or {}).get("tables") or []:
+                for mrow in table.get("rows") or []:
+                    if str(mrow.get("monitor")) != key:
+                        continue
+                    if meta:
+                        mrow.update({"paused": True, "paused_since": meta.get("since"),
+                                     "paused_note": meta.get("note")})
+                    else:
+                        for field in ("paused", "paused_since", "paused_note"):
+                            mrow.pop(field, None)
+
+
+async def auto_resume_forever() -> None:
+    """Раз в минуту возвращает в наблюдение тех, у кого истекло время паузы."""
+    while True:
+        try:
+            for kind, key in resume_due():
+                logger.info("monitoring resumed by schedule: %s %s", kind, key)
+        except Exception:  # noqa: BLE001 — фоновая задача не должна умирать
+            logger.exception("auto-resume check failed")
+        await asyncio.sleep(60)
+
+
+PAUSED.update(load_pause_state())
+
+
 def probe_http(url: str) -> dict[str, Any]:
     started = time.monotonic()
     req = urllib.request.Request(url, headers={"User-Agent": "servers-info-dash/projects"})
@@ -290,8 +428,16 @@ def _kuma_alerts(data: dict[str, Any]) -> None:
         limits.append({"id": f"kuma_method_{i}", "title": titles[i] if i < len(titles) else "Методика Kuma",
                        "impact": text, "action": "Ничего — это описание методики, а не ошибка.", "source_message": text})
     rows = next((t.get("rows") or [] for t in data.get("tables") or [] if t.get("id") == "kuma_monitors"), [])
+    paused_monitors = PAUSED.get("monitors", {})
+    for r in rows:
+        meta = paused_monitors.get(str(r.get("monitor")))
+        if meta:
+            r["paused"] = True
+            r["paused_since"] = meta.get("since")
+            r["paused_note"] = meta.get("note")
     down = [str(r.get("monitor")) for r in rows
-            if str(r.get("state") or "").upper() == "DOWN" and r.get("monitor")]
+            if str(r.get("state") or "").upper() == "DOWN" and r.get("monitor")
+            and str(r.get("monitor")) not in paused_monitors]
     if not down:
         n = next((k.get("value") for k in data.get("kpis") or [] if k.get("id") == "down"), 0)
         down = [f"{n} шт."] if isinstance(n, int) and n > 0 else []
@@ -502,6 +648,13 @@ _SLOW_STREAK = 3
 
 async def collect(cfg: ProjectsConfig) -> dict[str, Any]:
     async def one(p: ProjectConfig) -> dict[str, Any]:
+        paused = pause_entry("projects", p.id)
+        if paused:
+            # Ни пробы, ни TLS, ни сводок: сервер недоступен или сайт ещё не нужен.
+            return {"id": p.id, "name": p.name, "stage": p.stage, "link": p.link, "note": p.note,
+                    "check": None, "tls": None, "analytics": None, "state": "paused", "issues": [],
+                    "paused_since": paused.get("since"), "paused_note": paused.get("note"),
+                    "paused_until": paused.get("resume_at")}
         check, tls, doc = await asyncio.gather(
             (asyncio.to_thread(probe_kuma_entry_page, p.check_url) if p.check_kind == "kuma-entry-page" else
              probe_via_server(p.check_url, p.check_via) if p.check_via else asyncio.to_thread(probe_http, p.check_url))
