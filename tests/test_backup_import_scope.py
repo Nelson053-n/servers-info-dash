@@ -12,7 +12,7 @@ NOW = dt.datetime(2026,11,10,11,tzinfo=dt.timezone.utc)
 def document(imports):
     ts = NOW.isoformat()
     sources = {}
-    for source in ('ru3','lv3','vm300-code'):
+    for source in ('ru3','lv3','vm300-code','bob'):
         row = dict(result='success',restore_result='passed',error_code=None,last_backup_success_at=ts,last_restore_verified_at=ts,protected_projects=list(m.SOURCES[source]))
         if source in imports:
             row.update(database_restore_result='passed',database_restore_verified_at=ts)
@@ -22,8 +22,8 @@ def document(imports):
 
 
 def test_exact_archive_import_scope_is_not_standalone_dump_scope():
-    doc = document({'ru3','lv3','vm300-code'})
-    assert next(k['value'] for k in doc['kpis'] if k['id']=='database_imports') == '3/3'
+    doc = document({'ru3','lv3','vm300-code','bob'})
+    assert next(k['value'] for k in doc['kpis'] if k['id']=='database_imports') == '4/4'
     limitation = doc['limitations'][0]
     assert limitation['id'] == 'backup_restore_scope_exact_archive'
     assert 'текущих архивов' in limitation['impact']
@@ -36,5 +36,5 @@ def test_exact_archive_import_scope_is_not_standalone_dump_scope():
 
 def test_incomplete_import_set_does_not_claim_full_restore():
     doc = document({'lv3'})
-    assert next(k['value'] for k in doc['kpis'] if k['id']=='database_imports') == '1/3'
+    assert next(k['value'] for k in doc['kpis'] if k['id']=='database_imports') == '1/4'
     assert doc['limitations'][0]['id'] == 'backup_restore_scope'

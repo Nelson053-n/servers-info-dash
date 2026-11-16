@@ -24,7 +24,7 @@ class HashedReader:
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('source',choices=['ru3','lv3','vm300-code']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('source',choices=['ru3','lv3','vm300-code','bob']);parser.add_argument('--xz',action='store_true');args=parser.parse_args()
     os.umask(0o077)
     receipt=json.loads((BASE/'receipts'/(args.source+'.json')).read_text())
     snapshot=receipt['snapshot_id'];expected=receipt['archive_sha256']
@@ -36,7 +36,7 @@ def main():
          'RESTIC_REPOSITORY':'rest:http://127.0.0.1:8000/projects/',
          'RESTIC_PASSWORD_FILE':str(BASE/'repository-password'),'RESTIC_REST_USERNAME':'info-backup',
          'RESTIC_REST_PASSWORD':Path('/var/lib/info-backup/secrets/api-password').read_text().strip()}
-    output=STAGE/(args.source+'-db-restore-audit.tar.gz')
+    output=STAGE/(args.source+'-db-restore-audit.tar.'+('xz' if args.xz else 'gz'))
     assert not output.exists(), 'audit payload already exists: review rather than overwrite'
     with tempfile.TemporaryDirectory(prefix='db-audit-'+args.source+'-',dir=STAGE) as temp:
         folder=Path(temp);records=[]
@@ -58,7 +58,11 @@ def main():
             assert len(records)==len(selected), 'missing database dump'
             proof={'source':args.source,'snapshot_id':snapshot,'archive_sha256':expected,'archive_sha_verified':True,'databases':records}
             (folder/'audit.json').write_text(json.dumps(proof))
-            with tarfile.open(output,'w:gz',compresslevel=3) as tar:
+            # SQL-текст в xz в разы меньше: для источника без прямого SSH это
+            # единственный способ уложить передачу в разумное время.
+            mode = 'w:xz' if args.xz else 'w:gz'
+            extra = {'preset': 6} if args.xz else {'compresslevel': 3}
+            with tarfile.open(output, mode, **extra) as tar:
                 for p in folder.iterdir():tar.add(p,arcname=p.name,recursive=False)
             print(json.dumps({'source':args.source,'archive_sha_verified':True,'database_dumps':len(records),'private_audit_bytes':output.stat().st_size}))
         finally:

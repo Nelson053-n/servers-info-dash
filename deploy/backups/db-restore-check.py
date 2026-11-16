@@ -5,8 +5,8 @@ import subprocess
 import time
 
 
-def _run(args, **kw):
-    p = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600, **kw)
+def _run(args, timeout=600, **kw):
+    p = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, **kw)
     if p.returncode:
         import re
         text = p.stderr.decode('utf-8','replace')
@@ -16,7 +16,8 @@ def _run(args, **kw):
     return p
 
 
-def restore_dump(path, kind, image, client=None):
+def restore_dump(path, kind, image, client=None, timeout=600):
+    """timeout — на импорт крупного дампа: Moodle Bob не укладывается в 10 минут."""
     name = 'info-db-restore-' + secrets.token_hex(8)
     volume = name + '-data'
     labels = ['--label', 'info.backup.restore-test=true']
@@ -28,7 +29,7 @@ def restore_dump(path, kind, image, client=None):
         args += ['--mount','type=volume,source='+volume+',target=/var/lib/mysql','-e','MYSQL_ALLOW_EMPTY_PASSWORD=yes','-e','MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=yes',image,'--innodb-buffer-pool-size=64M','--performance-schema=OFF','--max-connections=10','--innodb-log-file-size=32M']
         ping = ['docker','exec',name,client,'-uroot','-N','-e','SELECT 1']
     try:
-        _run(args)
+        _run(args, timeout=max(120, min(timeout, 900)))
         stable = 0
         for _ in range(180):
             ready = subprocess.run(ping,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10).returncode == 0
@@ -46,7 +47,7 @@ def restore_dump(path, kind, image, client=None):
         else:
             command=['docker','exec','-i',name,client,'-uroot']
         with open(path,'rb') as f:
-            _run(command,stdin=f)
+            _run(command, timeout=timeout, stdin=f)
         return {'result':'passed','kind':kind,'scope':'isolated_database_import','network':'none'}
     finally:
         # Only the exact randomly named container created above is a cleanup target.

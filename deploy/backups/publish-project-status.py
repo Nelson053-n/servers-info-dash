@@ -53,7 +53,7 @@ if __name__=='__main__':
             try:
                 proof=json.loads((path.parent/'receipts'/(name+'.json')).read_text())
                 coverage.validate_database_coverage(proof['manifest'])
-                if name in {'ru3','lv3','vm300-code'}:
+                if name in {'ru3','lv3','vm300-code','bob'}:
                     try:
                         dbproof=json.loads((path.parent/'database-restore-proofs'/(name+'.json')).read_text())
                         clean['database_restore_verified_at']=database_restore_evidence(dbproof,proof,name,now)
