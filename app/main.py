@@ -2550,7 +2550,12 @@ def _send_telegram(token: str, chat_id: str, text: str) -> bool:
 PROJECT_ALERT_PATH = Path("config/project_alert_state.json")
 # Замечание -> когда о нём сообщили; одно и то же не чаще, чем раз в PROJECT_ALERT_TTL_H часов.
 _PROJECT_ALERTS: dict[str, dict[str, Any]] = {}
+# сколько циклов подряд замечание уже видно (нужно для подтверждения)
+_PROJECT_PENDING: dict[str, int] = {}
 PROJECT_ALERT_TTL_H = 12
+# Замечание должно повториться в двух циклах подряд: одиночный сетевой сбой
+# проверки иначе даёт пару «проблема»/«снято» по кругу.
+PROJECT_ALERT_CONFIRM = 2
 
 
 def _load_project_alert_state() -> dict[str, dict[str, Any]]:
@@ -2623,9 +2628,15 @@ async def _project_alert_cycle() -> None:
             key = f"{project.get('id')}|{text[:160]}"
             active[key] = {"project": str(project.get("name") or project.get("id")), "text": text}
     changed = False
+    for key in list(_PROJECT_PENDING):
+        if key not in active:
+            _PROJECT_PENDING.pop(key, None)
     for key, info in active.items():
         sent = _PROJECT_ALERTS.get(key) or {}
         if sent.get("state") == "bad" and _alert_age_hours(sent.get("at")) < PROJECT_ALERT_TTL_H:
+            continue
+        _PROJECT_PENDING[key] = _PROJECT_PENDING.get(key, 0) + 1
+        if _PROJECT_PENDING[key] < PROJECT_ALERT_CONFIRM:
             continue
         ok = await asyncio.to_thread(
             _send_telegram, bot.token, bot.chat_id,
@@ -2634,6 +2645,7 @@ async def _project_alert_cycle() -> None:
         if not ok:
             continue
         _PROJECT_ALERTS[key] = {"state": "bad", "at": now.isoformat(), "project": info["project"]}
+        _PROJECT_PENDING.pop(key, None)
         changed = True
     for key, sent in list(_PROJECT_ALERTS.items()):
         if key in active or sent.get("state") != "bad":
@@ -2663,6 +2675,62 @@ async def _notify_project_alerts_forever() -> None:
 
 
 _alert_last_sent: dict[tuple[str, str], float] = {}
+
+NOTIFY_STATE_PATH = Path("config/notify_state.json")
+_notify_state_dirty = False
+
+
+def _load_notify_state() -> None:
+    """Перезапуск контейнера не должен повторять уже отправленные тревоги."""
+    try:
+        raw = json.loads(NOTIFY_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    notified = raw.get("notified")
+    if isinstance(notified, dict):
+        for name, keys in notified.items():
+            if isinstance(name, str) and isinstance(keys, list):
+                _notified_state[name] = {k for k in keys if isinstance(k, str)}
+    sent = raw.get("sent_at")
+    if isinstance(sent, dict):
+        for name, keys in sent.items():
+            if not isinstance(name, str) or not isinstance(keys, dict):
+                continue
+            for key, stamp in keys.items():
+                if isinstance(key, str) and isinstance(stamp, (int, float)):
+                    _alert_last_sent[(name, key)] = float(stamp)
+
+
+def _save_notify_state() -> None:
+    global _notify_state_dirty
+    if not _notify_state_dirty:
+        return
+    payload = {
+        "notified": {name: sorted(keys) for name, keys in _notified_state.items() if keys},
+        "sent_at": {
+            name: {key: stamp for (row, key), stamp in _alert_last_sent.items() if row == name}
+            for name in {row for row, _ in _alert_last_sent}
+        },
+    }
+    NOTIFY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = NOTIFY_STATE_PATH.with_name(f".{NOTIFY_STATE_PATH.name}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, NOTIFY_STATE_PATH)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    NOTIFY_STATE_PATH.chmod(0o600)
+    _notify_state_dirty = False
+
+
+
 
 
 def _metric_limit(threshold: float | None, hysteresis: float, sticky: bool) -> float | None:
@@ -2695,6 +2763,7 @@ async def _check_and_notify(
     servers: list[dict[str, Any]],
 ) -> None:
     """Check thresholds and send Telegram alerts."""
+    global _notify_state_dirty
     bot = cfg.bot
     if not bot.enabled or not bot.token or not bot.chat_id:
         return
@@ -2813,7 +2882,7 @@ async def _check_and_notify(
                 logger.info("alert muted by quiet hours: %s %s", name, key)
                 continue
             last_sent = _alert_last_sent.get((name, key))
-            if cooldown and last_sent is not None and time.monotonic() - last_sent < cooldown:
+            if cooldown and last_sent is not None and time.time() - last_sent < cooldown:
                 logger.info("alert suppressed by cooldown: %s %s", name, key)
                 continue
             told.add(key)
@@ -2854,7 +2923,9 @@ async def _check_and_notify(
                 )
 
         for key in told:
-            _alert_last_sent[(name, key)] = time.monotonic()
+            _alert_last_sent[(name, key)] = time.time()
+        if told or recovered:
+            _notify_state_dirty = True
         _notified_state[name] = (prev | told) - recovered
 
         # --- recovery notifications ---
@@ -2900,6 +2971,7 @@ async def _check_and_notify(
                     f"\u2705 <b>{name}</b> TX OK{val}"
                 )
 
+    _save_notify_state()
     if alerts:
         text = "\n".join(alerts)
         loop = asyncio.get_running_loop()
@@ -2978,6 +3050,7 @@ async def _start_background_tasks() -> None:
     asyncio.create_task(projects_tab.run_forever())
     asyncio.create_task(projects_tab.auto_resume_forever())
     _PROJECT_ALERTS.update(_load_project_alert_state())
+    _load_notify_state()
     asyncio.create_task(_notify_project_alerts_forever())
 
 
