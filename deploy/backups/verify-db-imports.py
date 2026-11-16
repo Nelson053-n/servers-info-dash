@@ -294,10 +294,26 @@ def publish():
         say('card_refresh_failed', reason=type(error).__name__)
 
 
+def backup_running():
+    """Ночной бэкап на VM310 всё ещё пишет receipts — ждать, а не проверять вчерашний."""
+    code = '''import json,subprocess
+out={}
+for unit in ('projects-backup.service',):
+    p=subprocess.run(['systemctl','show',unit,'-p','ActiveState','--value'],capture_output=True,text=True)
+    out[unit]=p.stdout.strip()
+print(json.dumps(out))
+'''
+    try:
+        return any(state in ('active', 'activating') for state in guest_json(code).values())
+    except Exception:  # noqa: BLE001 — недоступный QGA не должен блокировать проверку навсегда
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sources', default=','.join(SOURCES))
-    parser.add_argument('--max-age-hours', type=float, default=30.0)
+    parser.add_argument('--max-age-hours', type=float, default=8.0,
+                        help='проверять только достаточно свежий receipt (эта ночь)')
     parser.add_argument('--no-publish', action='store_true')
     args = parser.parse_args()
     global FRESH_HOURS
@@ -316,11 +332,11 @@ def main():
                 reason=str(error)[:300], private_root=str(root))
             results.append({'source': source, 'status': 'failed', 'reason': str(error)[:300]})
             failed.append(source)
-    if not args.no_publish and not failed:
-        publish()
     summary = {'finished_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'sources': results,
                'failed': failed}
     (STATE / 'last-run.json').write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    if not args.no_publish and not failed:
+        publish()
     say('finished', failed=failed, sources=[(r['source'], r['status']) for r in results])
     if failed:
         return 1
