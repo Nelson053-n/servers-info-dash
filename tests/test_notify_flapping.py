@@ -46,6 +46,9 @@ def _capture(main_module, monkeypatch):
     monkeypatch.setattr(main_module.cfg, "bot", _bot(main_module))
     main_module._notified_state.clear()
     main_module._trigger_counts.clear()
+    # состояние антидребезга тоже между тестами не переносится
+    main_module._clear_streak.clear()
+    main_module._alert_last_sent.clear()
     return sent
 
 
