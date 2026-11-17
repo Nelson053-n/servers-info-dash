@@ -2556,6 +2556,8 @@ PROJECT_ALERT_TTL_H = 12
 # Замечание должно повториться в двух циклах подряд: одиночный сетевой сбой
 # проверки иначе даёт пару «проблема»/«снято» по кругу.
 PROJECT_ALERT_CONFIRM = 2
+# Застарелое замечание напоминает всё реже: 12 ч, сутки, двое, дальше — раз в двое суток.
+PROJECT_REPEAT_HOURS = (12, 24, 48)
 
 
 def _load_project_alert_state() -> dict[str, dict[str, Any]]:
@@ -2572,6 +2574,7 @@ def _load_project_alert_state() -> dict[str, dict[str, Any]]:
                 "state": meta.get("state") if isinstance(meta.get("state"), str) else None,
                 "at": meta.get("at") if isinstance(meta.get("at"), str) else None,
                 "project": meta.get("project") if isinstance(meta.get("project"), str) else None,
+                "repeats": int(meta.get("repeats") or 0) if isinstance(meta.get("repeats"), (int, float)) else 0,
             }
     return clean
 
@@ -2633,8 +2636,11 @@ async def _project_alert_cycle() -> None:
             _PROJECT_PENDING.pop(key, None)
     for key, info in active.items():
         sent = _PROJECT_ALERTS.get(key) or {}
-        if sent.get("state") == "bad" and _alert_age_hours(sent.get("at")) < PROJECT_ALERT_TTL_H:
-            continue
+        if sent.get("state") == "bad":
+            repeats = int(sent.get("repeats") or 1)
+            interval = PROJECT_REPEAT_HOURS[min(repeats - 1, len(PROJECT_REPEAT_HOURS) - 1)]
+            if _alert_age_hours(sent.get("at")) < interval:
+                continue
         _PROJECT_PENDING[key] = _PROJECT_PENDING.get(key, 0) + 1
         if _PROJECT_PENDING[key] < PROJECT_ALERT_CONFIRM:
             continue
@@ -2644,7 +2650,9 @@ async def _project_alert_cycle() -> None:
         )
         if not ok:
             continue
-        _PROJECT_ALERTS[key] = {"state": "bad", "at": now.isoformat(), "project": info["project"]}
+        repeats = int((_PROJECT_ALERTS.get(key) or {}).get("repeats") or 0) + 1
+        _PROJECT_ALERTS[key] = {"state": "bad", "at": now.isoformat(), "project": info["project"],
+                                "repeats": repeats}
         _PROJECT_PENDING.pop(key, None)
         changed = True
     for key, sent in list(_PROJECT_ALERTS.items()):
@@ -2655,7 +2663,8 @@ async def _project_alert_cycle() -> None:
             f"\u2705 Info \u00b7 {sent.get('project') or key.split('|')[0]}\nзамечание снято",
         )
         if ok:
-            _PROJECT_ALERTS[key] = {"state": "ok", "at": now.isoformat(), "project": sent.get("project")}
+            _PROJECT_ALERTS[key] = {"state": "ok", "at": now.isoformat(), "project": sent.get("project"),
+                                "repeats": 0}
             changed = True
     for key, sent in list(_PROJECT_ALERTS.items()):
         if sent.get("state") == "ok" and _alert_age_hours(sent.get("at")) > 24 * 7:
@@ -2675,6 +2684,30 @@ async def _notify_project_alerts_forever() -> None:
 
 
 _alert_last_sent: dict[tuple[str, str], float] = {}
+
+# Сервер, который за 20 минут несколько раз ушёл и вернулся, — это не две аварии,
+# а одна нестабильность. Сообщаем один раз и молчим час.
+FLAP_WINDOW_SEC = 20 * 60
+FLAP_TRANSITIONS = 4
+FLAP_MUTE_SEC = 60 * 60
+_flap_history: dict[str, list[float]] = {}
+_mute_until: dict[str, float] = {}
+
+
+def _note_transition(name: str, was_down: bool, now_down: bool) -> bool:
+    """True — сервер признан «мигающим» в этом цикле (сообщение уже отдано)."""
+    if was_down == now_down:
+        return False
+    moment = time.time()
+    history = [stamp for stamp in _flap_history.get(name, []) if moment - stamp <= FLAP_WINDOW_SEC]
+    history.append(moment)
+    _flap_history[name] = history
+    if len(history) < FLAP_TRANSITIONS:
+        return False
+    _mute_until[name] = moment + FLAP_MUTE_SEC
+    _flap_history[name] = []
+    return True
+
 
 NOTIFY_STATE_PATH = Path("config/notify_state.json")
 _notify_state_dirty = False
@@ -2861,6 +2894,18 @@ async def _check_and_notify(
             counts.update(frozen)
             counts["down"] = frozen.get("down", 0) + 1
             triggered = (triggered & {"down"}) | (prev - {"down"})
+        if _note_transition(name, "down" in prev, "down" in triggered):
+            _notified_state[name] = triggered
+            _notify_state_dirty = True
+            alerts.append(
+                f"\U0001f501 <b>{name}</b> мигает: {FLAP_TRANSITIONS} перехода за 20 минут"
+                " — подробности в Info, сообщения по нему на час выключены"
+            )
+            continue
+        if _mute_until.get(name, 0.0) > time.time():
+            # сервер в часовой паузе после «мигания»: состояние помним, но не шумим
+            _notified_state[name] = triggered
+            continue
         new_alerts = triggered - prev
         # Восстановление тоже требует выдержки: один спокойный замер после
         # всплеска — ещё не «всё хорошо».
