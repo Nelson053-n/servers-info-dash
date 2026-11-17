@@ -85,6 +85,11 @@ class BotConfig(BaseModel):
     notify_hysteresis: float = 5.0
     # Повтор по тому же серверу и метрике — не чаще, чем раз в столько минут.
     notify_cooldown_min: int = 20
+    # Индивидуальные пороги CPU: «Россия (вход)» и «(вход 4)» штатно живут
+    # на 90-100%, общий порог 90% давал по три тревоги в сутки на каждой.
+    notify_cpu_thresholds: dict[str, float] = {}
+    # Сколько замеров подряд нужно для этих серверов (10 = пять минут).
+    notify_cpu_delays: dict[str, int] = {}
     # Тихие часы во Владивостоке (HH:MM). Пусто — тихих часов нет. Гасит
     # метрики (CPU/диск/трафик/пинг), но НЕ сообщения о недоступности.
     quiet_from: str = ""
@@ -2835,12 +2840,14 @@ async def _check_and_notify(
         frozen = dict(counts) if is_down else None
 
         cpu = srv.get("cpu_percent")
-        cpu_limit = _metric_limit(bot.notify_cpu_threshold, hysteresis, "cpu" in prev)
+        cpu_threshold = bot.notify_cpu_thresholds.get(name, bot.notify_cpu_threshold)
+        cpu_delay = int(bot.notify_cpu_delays.get(name, delay))
+        cpu_limit = _metric_limit(cpu_threshold, hysteresis, "cpu" in prev)
         if cpu_limit is not None and cpu is not None and cpu >= cpu_limit:
             counts["cpu"] = counts.get("cpu", 0) + 1
         else:
             counts["cpu"] = 0
-        if counts.get("cpu", 0) >= delay:
+        if counts.get("cpu", 0) >= cpu_delay:
             triggered.add("cpu")
 
         ping = srv.get("ping_ms")
@@ -2938,7 +2945,7 @@ async def _check_and_notify(
             elif key == "cpu":
                 alerts.append(
                     f"\U0001f525 <b>{name}</b> CPU {cpu:.1f}%"
-                    f" \u2265 {bot.notify_cpu_threshold}%"
+                    f" \u2265 {cpu_threshold}%"
                 )
             elif key == "ping":
                 alerts.append(
@@ -4234,6 +4241,11 @@ class BotConfigRequest(BaseModel):
     notify_hysteresis: float = 5.0
     # Повтор по тому же серверу и метрике — не чаще, чем раз в столько минут.
     notify_cooldown_min: int = 20
+    # Индивидуальные пороги CPU: «Россия (вход)» и «(вход 4)» штатно живут
+    # на 90-100%, общий порог 90% давал по три тревоги в сутки на каждой.
+    notify_cpu_thresholds: dict[str, float] = {}
+    # Сколько замеров подряд нужно для этих серверов (10 = пять минут).
+    notify_cpu_delays: dict[str, int] = {}
     # Тихие часы во Владивостоке (HH:MM). Пусто — тихих часов нет. Гасит
     # метрики (CPU/диск/трафик/пинг), но НЕ сообщения о недоступности.
     quiet_from: str = ""
